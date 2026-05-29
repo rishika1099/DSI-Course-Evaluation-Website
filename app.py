@@ -592,10 +592,8 @@ course_search = st.sidebar.text_input(
 
 _global_prof_map = build_prof_display_map(df[PROF_COL]) if PROF_COL in df.columns else {}
 all_profs = sorted(set(_global_prof_map.values()))
-all_sems = sorted([s for s in df.get(SEM_COL, pd.Series(dtype=str)).dropna().unique().tolist() if s])
 
 prof_filter = st.sidebar.multiselect("Professor", all_profs, default=[])
-sem_filter = st.sidebar.multiselect("Semester", all_sems, default=[])
 
 course_type_filter = st.sidebar.multiselect(
     "Course Type",
@@ -607,6 +605,11 @@ all_terms = sorted(
     [t for t in df.get("_term", pd.Series(dtype=str)).dropna().unique().tolist() if t]
 )
 term_filter = st.sidebar.multiselect("Term", all_terms, default=[])
+
+all_years = sorted(
+    [int(y) for y in df.get("_year", pd.Series(dtype=float)).dropna().unique().tolist()]
+)
+year_filter = st.sidebar.multiselect("Year", all_years, default=[])
 
 component_filter = st.sidebar.multiselect(
     "Must have components",
@@ -637,12 +640,12 @@ if prof_filter and PROF_COL in filtered.columns:
     selected_keys = {_prof_normalize_key(p) for p in prof_filter}
     filtered = filtered[filtered["_prof_key"].isin(selected_keys)]
 
-if sem_filter and SEM_COL in filtered.columns:
-    filtered = filtered[filtered[SEM_COL].isin(sem_filter)]
 if course_type_filter and "course_type" in filtered.columns:
     filtered = filtered[filtered["course_type"].isin(course_type_filter)]
 if term_filter and "_term" in filtered.columns:
     filtered = filtered[filtered["_term"].isin(term_filter)]
+if year_filter and "_year" in filtered.columns:
+    filtered = filtered[filtered["_year"].isin(year_filter)]
 if component_filter and "_components" in filtered.columns and COURSE_COL in filtered.columns:
     needed = set(component_filter)
     course_comp_union = (
