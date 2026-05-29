@@ -1201,9 +1201,10 @@ with tab_overview:
             "avg_diff_disp": "Difficult",
             "liked_disp": "Liked",
             "style": "Style",
+            "n": "Reviews",
         })
 
-        display_cols = ["Course", "Type", "Style", "n", "Useful", "Difficult", "Liked"]
+        display_cols = ["Course", "Type", "Style", "Reviews", "Useful", "Difficult", "Liked"]
 
         def _row_style(row):
             styles = [""] * len(row)
@@ -1239,8 +1240,8 @@ with tab_overview:
                         "Exam-driven / Project-driven / Mixed / Problem-set-heavy / Reading-heavy / Unknown."
                     ),
                 ),
-                "n": st.column_config.NumberColumn(
-                    "n", help="Number of student reviews this course has received."),
+                "Reviews": st.column_config.NumberColumn(
+                    "Reviews", help="Number of student reviews this course has received."),
                 "Useful": st.column_config.TextColumn(
                     "Useful",
                     help=(
