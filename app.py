@@ -96,36 +96,79 @@ _COMPONENT_ALIASES = {
     "Presentations":  [r"presentations?"],
 }
 
-# Course-style classifier (derived from components)
+# Course-style classifier (derived from components, with comment-text fallback)
 STYLE_COLORS = {
     "Exam-driven":      "#c0392b",
     "Project-driven":   "#1e8449",
     "Mixed":            "#7d3c98",
     "Reading-heavy":    "#b9770e",
     "Problem-set-heavy":"#2471a3",
-    "—":                "#7f8c8d",
+    "Unknown":          "#95a5a6",
 }
 
-def classify_style(comp_freq: dict, n_reviews: int) -> str:
-    """comp_freq: {component: count}. Returns a style label string."""
-    if not comp_freq or n_reviews == 0:
-        return "—"
-    pct = {k: v / n_reviews for k, v in comp_freq.items()}
-    has_exam = max(pct.get("Midterm Exam", 0), pct.get("Final Exam", 0)) >= 0.4
-    has_project = max(pct.get("Projects", 0), pct.get("Final Project", 0)) >= 0.4
-    has_psets = pct.get("Problem Sets", 0) >= 0.5
-    has_readings = pct.get("Readings", 0) >= 0.5
-    if has_exam and has_project:
-        return "Mixed"
-    if has_exam:
-        return "Exam-driven"
-    if has_project:
-        return "Project-driven"
-    if has_psets:
-        return "Problem-set-heavy"
-    if has_readings:
-        return "Reading-heavy"
-    return "Mixed"
+# Comment-text fallback patterns used when the assignments checkbox is empty
+_STYLE_TEXT_HINTS = {
+    "exam":    [r"\bmidterm\b", r"\bfinal exam\b", r"\bexams?\b"],
+    "project": [r"\bfinal project\b", r"\bprojects?\b", r"\bcapstone\b"],
+    "pset":    [r"\bproblem sets?\b", r"\bpsets?\b", r"\bhomework\b", r"\bhw\b"],
+    "reading": [r"\breadings?\b", r"\bpapers?\b"],
+}
+
+def _infer_style_from_text(comments: list[str]) -> dict[str, int]:
+    """Count style hints across raw comment text. Used when checkbox data is empty."""
+    counts = {"exam": 0, "project": 0, "pset": 0, "reading": 0}
+    for c in comments:
+        if not isinstance(c, str):
+            continue
+        low = c.lower()
+        for k, pats in _STYLE_TEXT_HINTS.items():
+            if any(re.search(p, low) for p in pats):
+                counts[k] += 1
+    return counts
+
+
+def classify_style(comp_freq: dict, n_reviews: int,
+                   comment_hints: dict | None = None) -> str:
+    """comp_freq: {component: count} from the checkbox field.
+    comment_hints: optional {exam/project/pset/reading: count} from comment text fallback.
+    Returns a style label."""
+    if n_reviews == 0:
+        return "Unknown"
+
+    # Primary signal: checkbox data
+    if comp_freq:
+        pct = {k: v / n_reviews for k, v in comp_freq.items()}
+        has_exam = max(pct.get("Midterm Exam", 0), pct.get("Final Exam", 0)) >= 0.4
+        has_project = max(pct.get("Projects", 0), pct.get("Final Project", 0)) >= 0.4
+        has_psets = pct.get("Problem Sets", 0) >= 0.5
+        has_readings = pct.get("Readings", 0) >= 0.5
+        if has_exam and has_project:
+            return "Mixed"
+        if has_exam:
+            return "Exam-driven"
+        if has_project:
+            return "Project-driven"
+        if has_psets:
+            return "Problem-set-heavy"
+        if has_readings:
+            return "Reading-heavy"
+
+    # Fallback: scan comment text for hints
+    if comment_hints:
+        exam_h = comment_hints.get("exam", 0)
+        proj_h = comment_hints.get("project", 0)
+        pset_h = comment_hints.get("pset", 0)
+        read_h = comment_hints.get("reading", 0)
+        if exam_h or proj_h or pset_h or read_h:
+            top = max([("Exam-driven", exam_h), ("Project-driven", proj_h),
+                       ("Problem-set-heavy", pset_h), ("Reading-heavy", read_h)],
+                      key=lambda kv: kv[1])
+            if exam_h > 0 and proj_h > 0 and abs(exam_h - proj_h) <= 1:
+                return "Mixed"
+            if top[1] > 0:
+                return top[0]
+
+    return "Unknown"
 
 def style_badge(style: str) -> str:
     color = STYLE_COLORS.get(style, "#7f8c8d")
@@ -414,7 +457,9 @@ def rating_strip(values: pd.Series, title: str, color: str = "#1f77b4"):
 
 
 def _sentiment_score(comments: pd.Series) -> float:
-    """Returns net sentiment as % (-100..+100) using POS_WORDS/NEG_WORDS."""
+    """Returns net sentiment as % (-100..+100) using POS_WORDS/NEG_WORDS.
+    Returns NaN when there are no comments with any opinionated words at all
+    (i.e. no signal — distinct from neutral consensus)."""
     s = comments.dropna().astype(str)
     s = s[s.str.strip() != ""]
     if s.empty:
@@ -428,7 +473,7 @@ def _sentiment_score(comments: pd.Series) -> float:
             neg += 1
     n = pos + neg
     if n == 0:
-        return 0.0
+        return float("nan")
     return 100.0 * (pos - neg) / n
 
 
@@ -455,17 +500,23 @@ def compute_course_summary(df: pd.DataFrame) -> pd.DataFrame:
     else:
         summary["sentiment"] = np.nan
 
-    # Course style derived from components
+    # Course style derived from components (with comment-text fallback)
     if "_components" in df.columns:
-        def _style_for_group(s: pd.Series):
+        def _style_for_course(course_name):
+            sub = df[df[COURSE_COL] == course_name]
             counts = Counter()
-            for comps in s:
+            for comps in sub["_components"]:
                 for c in comps:
                     counts[c] += 1
-            return classify_style(dict(counts), len(s))
-        summary["style"] = g["_components"].apply(_style_for_group).values
+            comments = (
+                sub[COMMENTS_COL].dropna().astype(str).tolist()
+                if COMMENTS_COL in sub.columns else []
+            )
+            hints = _infer_style_from_text(comments) if comments else None
+            return classify_style(dict(counts), len(sub), hints)
+        summary["style"] = summary["Course"].apply(_style_for_course).values
     else:
-        summary["style"] = "—"
+        summary["style"] = "Unknown"
 
     # Stronger Bayesian shrinkage so n=1 courses don't dominate
     shrink = summary["n"] / (summary["n"] + 8.0)
@@ -1108,11 +1159,64 @@ with tab_overview:
             show_disp[display_cols]
             .style.apply(_row_style, axis=1)
         )
-        st.dataframe(styler, use_container_width=True)
-        st.caption(
-            "**Useful** and **Difficult** show mean (median in parens) — if mean and median disagree, "
-            "a few outliers are pulling the average. **Sentiment** is net positive/negative tone from comments "
-            "(-100 to +100). **Score** is shrunk toward the average for low-n courses."
+        st.dataframe(
+            styler,
+            use_container_width=True,
+            column_config={
+                "Course": st.column_config.TextColumn(
+                    "Course", help="Course code and name as submitted in the form."),
+                "Type": st.column_config.TextColumn(
+                    "Type", help="Core (required for the program) vs Elective."),
+                "Style": st.column_config.TextColumn(
+                    "Style",
+                    help=(
+                        "How the course is assessed, derived from the 'assignments' field "
+                        "(plus comment-text fallback when checkboxes are blank). "
+                        "Exam-driven / Project-driven / Mixed / Problem-set-heavy / Reading-heavy / Unknown."
+                    ),
+                ),
+                "n": st.column_config.NumberColumn(
+                    "n", help="Number of student reviews this course has received."),
+                "Useful": st.column_config.TextColumn(
+                    "Useful",
+                    help=(
+                        "Average usefulness rating (1-10). Median in parens — if mean and "
+                        "median disagree, a few outliers are pulling the average."
+                    ),
+                ),
+                "Difficult": st.column_config.TextColumn(
+                    "Difficult",
+                    help="Average difficulty (1-10). Median in parens. 10 = very hard.",
+                ),
+                "Liked": st.column_config.TextColumn(
+                    "Liked",
+                    help="% of reviewers who answered 'Yes' to 'Did you like this class?'",
+                ),
+                "Sentiment": st.column_config.TextColumn(
+                    "Sentiment",
+                    help=(
+                        "Net positive vs negative tone in the written comments, -100 to +100. "
+                        "Counts comments with positive words (great, useful, loved...) vs negative "
+                        "(confusing, harsh, frustrating...). '—' means no opinionated words were "
+                        "found in any comment (no signal — NOT neutral consensus)."
+                    ),
+                ),
+                "Score": st.column_config.TextColumn(
+                    "Score",
+                    help=(
+                        "Personalized value score using the weights in the sidebar. Bayesian-shrunk: "
+                        "low-n courses are pulled toward the average so 1-review courses don't dominate."
+                    ),
+                ),
+                "confidence": st.column_config.TextColumn(
+                    "Confidence",
+                    help=(
+                        "How much to trust this row's averages, based purely on review count. "
+                        "n≥15: High · n≥6: Medium · n≥3: Low · n<3: Very low. "
+                        "Most courses will be 'Very low' until more reviews come in."
+                    ),
+                ),
+            },
         )
 
         # ---- Bubble chart (replaces the bar plot) ----
@@ -1180,12 +1284,17 @@ with tab_deep:
         f = filtered[filtered[COURSE_COL] == course].copy()
         n = len(f)
 
-        # Course style chip from components
+        # Course style chip from components (with comment-text fallback)
         comp_counts = Counter()
         for comps in f.get("_components", []):
             for c in comps:
                 comp_counts[c] += 1
-        _style = classify_style(dict(comp_counts), n)
+        comments_for_hints = (
+            f[COMMENTS_COL].dropna().astype(str).tolist()
+            if COMMENTS_COL in f.columns else []
+        )
+        _style_hints = _infer_style_from_text(comments_for_hints) if comments_for_hints else None
+        _style = classify_style(dict(comp_counts), n, _style_hints)
 
         st.markdown(
             f"<div style='margin: 4px 0 10px 0;'>"
