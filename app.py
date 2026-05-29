@@ -11,7 +11,11 @@ import hashlib
 from datetime import datetime
 from difflib import SequenceMatcher
 
-st.set_page_config(page_title="Course Decision Dashboard", layout="wide")
+st.set_page_config(
+    page_title="DSI Course Decision Dashboard",
+    page_icon="🦁",
+    layout="wide",
+)
 
 # ---- Color-code the three top-level tabs ----
 # Streamlit tabs render as <button data-baseweb="tab"> inside a [role="tablist"]
@@ -1138,7 +1142,7 @@ st.title("Course Decision Dashboard")
 st.caption("Built from student responses (auto-refreshes). Use filters in the sidebar.")
 
 tab_overview, tab_deep, tab_compare = st.tabs(
-    ["📊 Overview (Rankings)", "🦁 Course Deep Dive", "⚖️ Compare Courses"]
+    ["📊 Overview (Rankings)", "🔍 Course Deep Dive", "⚖️ Compare Courses"]
 )
 
 
