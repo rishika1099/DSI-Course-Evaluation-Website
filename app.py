@@ -1644,18 +1644,54 @@ with tab_deep:
                   .index.tolist()
             )
 
-            # Color-code each prof tab with a deterministic colored circle prefix
-            TAB_COLORS = ["🟦", "🟧", "🟩", "🟪", "🟥", "🟨", "🟫", "⬛", "⬜"]
-            def _tab_emoji(key: str) -> str:
+            # Color-code each prof tab with a deterministic CSS background.
+            # Same prof key -> same color across courses (md5(key) % palette).
+            PROF_BG_PALETTE = [
+                ("#fee2e2", "#fca5a5", "#dc2626"),  # red
+                ("#fef3c7", "#fde68a", "#d97706"),  # amber
+                ("#dcfce7", "#86efac", "#16a34a"),  # green
+                ("#dbeafe", "#93c5fd", "#2563eb"),  # blue
+                ("#fae8ff", "#e9d5ff", "#9333ea"),  # purple
+                ("#fce7f3", "#f9a8d4", "#db2777"),  # pink
+                ("#e0e7ff", "#a5b4fc", "#4f46e5"),  # indigo
+                ("#fed7aa", "#fdba74", "#ea580c"),  # orange
+                ("#ccfbf1", "#5eead4", "#0d9488"),  # teal
+            ]
+            UNKNOWN_BG = ("#f3f4f6", "#d1d5db", "#6b7280")  # gray for "— unknown —"
+
+            def _prof_palette(key: str):
                 if key == "— unknown —":
-                    return "⬜"
-                idx = int(hashlib.md5(key.encode("utf-8")).hexdigest(), 16) % len(TAB_COLORS)
-                return TAB_COLORS[idx]
+                    return UNKNOWN_BG
+                idx = int(hashlib.md5(key.encode("utf-8")).hexdigest(), 16) % len(PROF_BG_PALETTE)
+                return PROF_BG_PALETTE[idx]
 
             tab_labels = [
-                f"{_tab_emoji(k)} {display_map[k]} ({rf[rf['_prof_group'] == k].shape[0]})"
+                f"{display_map[k]} ({rf[rf['_prof_group'] == k].shape[0]})"
                 for k in prof_order_keys
             ]
+
+            # Inject CSS targeting nested tab-lists (the ones inside Streamlit
+            # tab-panels — i.e. the prof tabs inside this Deep Dive panel).
+            # nth-of-type indexes are 1-based and follow the order we pass to st.tabs.
+            css_rules = []
+            for i, key in enumerate(prof_order_keys, start=1):
+                soft, active, border = _prof_palette(key)
+                css_rules.append(
+                    f"""
+                    [data-baseweb="tab-panel"] [data-baseweb="tab-list"] > button[data-baseweb="tab"]:nth-of-type({i}) {{
+                        background-color: {soft} !important;
+                    }}
+                    [data-baseweb="tab-panel"] [data-baseweb="tab-list"] > button[data-baseweb="tab"]:nth-of-type({i})[aria-selected="true"] {{
+                        background-color: {active} !important;
+                        border-bottom-color: {border} !important;
+                    }}
+                    """
+                )
+            st.markdown(
+                "<style>" + "".join(css_rules) + "</style>",
+                unsafe_allow_html=True,
+            )
+
             prof_tabs = st.tabs(tab_labels)
             for prof_tab, key in zip(prof_tabs, prof_order_keys):
                 with prof_tab:
