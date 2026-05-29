@@ -581,104 +581,207 @@ def _extractive_summary(text: str, max_sentences: int = 3, max_chars: int = 480)
     return " ".join(chosen)[:max_chars]
 
 
-def _hf_summarize(text: str, hf_token: str,
-                  max_length: int = 120, min_length: int = 30,
-                  timeout: int = 30):
-    """Returns (summary, status). status: 'ok' | 'ok-fallback' | 'empty' | 'error: ...'.
-
-    Strategy:
-      1. Try the HF Inference API via raw POST (stable across SDK versions).
-      2. If it fails for ANY reason, fall back to a local extractive summary.
-         The user gets a useful answer either way.
-    """
-    if not text.strip():
-        return None, "empty"
-
-    if len(text) > 3500:
-        text = text[:3500]
-
-    # ---- Attempt 1: HF Inference API via raw HTTP ----
-    hf_error = None
-    if hf_token:
-        try:
-            import requests
-            api_url = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
-            resp = requests.post(
-                api_url,
-                headers={"Authorization": f"Bearer {hf_token}"},
-                json={
-                    "inputs": text,
-                    "parameters": {
-                        "max_length": max_length,
-                        "min_length": min_length,
-                        "do_sample": False,
+def _hf_chat_summarize(prompt: str, hf_token: str, timeout: int = 30):
+    """Use HF Router chat completion (the current free-tier endpoint).
+    Returns (text, status) where status is 'ok' | 'error: ...'."""
+    if not hf_token:
+        return None, "error: no token"
+    try:
+        import requests
+        # HF Router routes to whichever provider currently serves a given model
+        api_url = "https://router.huggingface.co/v1/chat/completions"
+        candidate_models = [
+            "meta-llama/Llama-3.2-3B-Instruct",
+            "mistralai/Mistral-7B-Instruct-v0.3",
+            "Qwen/Qwen2.5-7B-Instruct",
+        ]
+        last_err = None
+        for model in candidate_models:
+            try:
+                resp = requests.post(
+                    api_url,
+                    headers={"Authorization": f"Bearer {hf_token}"},
+                    json={
+                        "model": model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You write concise, neutral summaries of student course "
+                                    "reviews in the style of an Amazon product review summary. "
+                                    "Always start with 'Students find this course' or 'Reviewers say'. "
+                                    "Synthesize the overall sentiment — do not quote a single review. "
+                                    "Maximum 3 sentences. No bullet points."
+                                ),
+                            },
+                            {"role": "user", "content": prompt[:3500]},
+                        ],
+                        "max_tokens": 180,
+                        "temperature": 0.2,
                     },
-                    "options": {"wait_for_model": True},
-                },
-                timeout=timeout,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                summary = None
-                if isinstance(data, list) and data:
-                    summary = data[0].get("summary_text") or data[0].get("generated_text")
-                elif isinstance(data, dict):
-                    summary = data.get("summary_text") or data.get("generated_text")
-                if summary:
-                    return summary.strip(), "ok"
-                hf_error = f"unexpected response shape: {str(data)[:200]}"
-            else:
-                hf_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
-        except Exception as e:
-            hf_error = f"{type(e).__name__}: {e}"
+                    timeout=timeout,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    msg = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    if msg and msg.strip():
+                        return msg.strip(), "ok"
+                    last_err = f"empty response from {model}"
+                else:
+                    last_err = f"{model} -> HTTP {resp.status_code}: {resp.text[:160]}"
+            except Exception as e:
+                last_err = f"{model} -> {type(e).__name__}: {e}"
+        return None, f"error: {last_err or 'all models failed'}"
+    except Exception as e:
+        return None, f"error: {type(e).__name__}: {e}"
 
-    # ---- Attempt 2: offline extractive fallback (always works) ----
-    extractive = _extractive_summary(text)
-    if extractive:
-        return extractive, "ok-fallback"
 
-    return None, f"error: {hf_error or 'no text to summarize'}"
+def _amazon_template(stats: dict, pos_count: int, neg_count: int, tip_count: int) -> str:
+    """Amazon-review-style opener built from structured form data. Always renders."""
+    n = stats.get("n", 0)
+    avg_use = stats.get("avg_use")
+    avg_diff = stats.get("avg_diff")
+    liked_pct = stats.get("liked_pct")
+    sentiment = stats.get("sentiment")
+    style = stats.get("style")
+
+    def use_phrase(x):
+        if x is None or pd.isna(x): return None
+        if x >= 8: return "**highly useful**"
+        if x >= 6.5: return "**useful**"
+        if x >= 5: return "**moderately useful**"
+        if x >= 3: return "of **limited usefulness**"
+        return "**not very useful**"
+
+    def diff_phrase(x):
+        if x is None or pd.isna(x): return None
+        if x >= 8: return "**very challenging**"
+        if x >= 6.5: return "**challenging**"
+        if x >= 4.5: return "**moderate** in difficulty"
+        if x >= 3: return "**manageable**"
+        return "**light**"
+
+    parts = []
+    use_p = use_phrase(avg_use)
+    diff_p = diff_phrase(avg_diff)
+    if use_p and diff_p:
+        parts.append(f"Students find this course {use_p} and {diff_p}.")
+    elif use_p:
+        parts.append(f"Students find this course {use_p}.")
+    elif diff_p:
+        parts.append(f"Students find this course {diff_p}.")
+
+    if liked_pct is not None and not pd.isna(liked_pct):
+        if liked_pct >= 85:
+            parts.append(f"**{int(liked_pct)}%** would recommend it — a strong consensus.")
+        elif liked_pct >= 60:
+            parts.append(f"**{int(liked_pct)}%** would recommend it.")
+        elif liked_pct >= 35:
+            parts.append(f"Only **{int(liked_pct)}%** would recommend it — reactions are mixed.")
+        else:
+            parts.append(f"Only **{int(liked_pct)}%** would recommend it.")
+
+    if sentiment is not None and not pd.isna(sentiment) and (pos_count + neg_count) >= 3:
+        if sentiment >= 40:
+            parts.append("Written comments lean positive.")
+        elif sentiment <= -40:
+            parts.append("Written comments lean critical.")
+
+    if style and style not in ("—", "Mixed"):
+        parts.append(f"The course is **{style.lower()}**.")
+
+    if tip_count >= 2:
+        parts.append(f"{tip_count} reviewers leave specific tips for doing well.")
+
+    if n == 1:
+        parts.append("_Based on 1 review — interpret with caution._")
+    elif n <= 3:
+        parts.append(f"_Based on {n} reviews — small sample._")
+
+    return " ".join(parts) if parts else f"_Based on {n} review{'s' if n != 1 else ''}._"
+
+
+def _format_quotes(comments: list[str], max_quotes: int = 2) -> str:
+    """Format a few comments as labeled quotes — used when bucket has too few comments to summarize."""
+    if not comments:
+        return ""
+    quoted = []
+    for c in comments[:max_quotes]:
+        c = c.strip()
+        if len(c) > 240:
+            c = c[:240].rstrip() + "…"
+        quoted.append(f"> {c}")
+    return "\n\n".join(quoted)
 
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
-def generate_review_summaries(course: str, comments_hash: str, comments_tuple: tuple) -> dict:
-    hf_token = st.secrets.get("HF_API_TOKEN")
-    if not hf_token:
-        return {"status": "no_token", "overall": None,
-                "positive": None, "negative": None, "tips": None}
+def generate_review_summaries(course: str, comments_hash: str,
+                              comments_tuple: tuple, stats_tuple: tuple) -> dict:
+    """Build an Amazon-style summary block.
 
+    Always returns:
+      - 'template': structured-data opener (always present)
+      - 'ai':       AI-written 2-3 sentence summary if HF responds, else None
+      - 'positive': either an AI-generated paragraph OR a list of raw quote strings
+      - 'negative': same
+      - 'tips':     same
+      - 'positive_is_quotes': bool — tells UI to render as blockquotes
+      - 'negative_is_quotes': bool
+      - 'tips_is_quotes':     bool
+      - 'errors':   list[str] for the expandable details panel
+    """
+    hf_token = st.secrets.get("HF_API_TOKEN") or ""
     comments = list(comments_tuple)
-    result = {"overall": None, "positive": None,
-              "negative": None, "tips": None,
-              "status": "ok", "errors": []}
-
-    all_text = " ".join(comments)
-    overall, status = _hf_summarize(all_text, hf_token, max_length=140, min_length=50)
-    if status in ("ok", "ok-fallback"):
-        result["overall"] = overall
-        if status == "ok-fallback":
-            result["used_fallback"] = True
-    elif status.startswith("error"):
-        result["errors"].append(f"overall: {status}")
+    stats = dict(stats_tuple)
 
     buckets = _bucket_comments(comments)
-    for key in ["positive", "negative", "tip"]:
-        bucket = buckets[key]
-        if len(bucket) == 0:
-            continue
-        joined = " ".join(bucket)
-        summary, sub_status = _hf_summarize(joined, hf_token)
-        if sub_status in ("ok", "ok-fallback"):
-            out_key = "tips" if key == "tip" else key
-            result[out_key] = summary
-            if sub_status == "ok-fallback":
-                result["used_fallback"] = True
-        elif sub_status.startswith("error"):
-            result["errors"].append(f"{key}: {sub_status}")
+    pos_n, neg_n, tip_n = len(buckets["positive"]), len(buckets["negative"]), len(buckets["tip"])
 
-    if not any([result["overall"], result["positive"],
-                result["negative"], result["tips"]]):
-        result["status"] = "all_failed"
+    result = {
+        "template": _amazon_template(stats, pos_n, neg_n, tip_n),
+        "ai": None,
+        "positive": None, "positive_is_quotes": False,
+        "negative": None, "negative_is_quotes": False,
+        "tips": None, "tips_is_quotes": False,
+        "errors": [],
+        "status": "ok",
+    }
+
+    # ---- AI overall summary (only attempt if HF token + enough material) ----
+    if hf_token and len(comments) >= 2 and sum(len(c) for c in comments) >= 120:
+        ai_prompt = (
+            "Summarize the following student course reviews in 2-3 sentences, "
+            "Amazon-review style. Focus on what students consistently say about the "
+            "course's usefulness, difficulty, workload, professor, and what to expect.\n\n"
+            "REVIEWS:\n" + "\n---\n".join(c.strip() for c in comments if c.strip())
+        )
+        ai_text, status = _hf_chat_summarize(ai_prompt, hf_token)
+        if status == "ok":
+            result["ai"] = ai_text
+        else:
+            result["errors"].append(f"overall: {status}")
+
+    # ---- Per-bucket: AI-summarize if 3+ comments, else show as quotes ----
+    bucket_to_key = {"positive": "positive", "negative": "negative", "tip": "tips"}
+    bucket_intro = {
+        "positive": "Summarize what students LOVED about this course in 1-2 sentences:",
+        "negative": "Summarize the COMMON COMPLAINTS in 1-2 sentences:",
+        "tip":      "Summarize the practical TIPS students give in 1-2 sentences:",
+    }
+    for bkey, out_key in bucket_to_key.items():
+        bucket = buckets[bkey]
+        if not bucket:
+            continue
+        if hf_token and len(bucket) >= 3:
+            prompt = bucket_intro[bkey] + "\n\n" + "\n---\n".join(bucket)
+            text, status = _hf_chat_summarize(prompt, hf_token)
+            if status == "ok":
+                result[out_key] = text
+                continue
+            result["errors"].append(f"{bkey}: {status}")
+        # Fallback: show comments as labeled quotes (not pretend-summarize)
+        result[out_key] = bucket[:2]   # raw list, UI will format
+        result[out_key + "_is_quotes"] = True
 
     return result
 
@@ -1239,62 +1342,86 @@ with tab_deep:
         comments_series = rf.get(COMMENTS_COL, pd.Series(dtype=str)).dropna().astype(str)
         comments_series = comments_series[comments_series.str.strip() != ""]
 
-        if not comments_series.empty:
-            comments_list = comments_series.tolist()
-            comments_hash = hashlib.md5(
-                "||".join(sorted(comments_list)).encode("utf-8")
-            ).hexdigest()
+        # Always render the template summary, even with 0 comments
+        rf_use = pd.to_numeric(rf.get(USE_COL, pd.Series(dtype=float)), errors="coerce").dropna()
+        rf_diff = pd.to_numeric(rf.get(DIFF_COL, pd.Series(dtype=float)), errors="coerce").dropna()
+        rf_liked = rf.get(LIKED_COL, pd.Series(dtype=bool)).dropna()
+        stats_for_summary = {
+            "n": len(rf),
+            "avg_use": float(rf_use.mean()) if not rf_use.empty else None,
+            "avg_diff": float(rf_diff.mean()) if not rf_diff.empty else None,
+            "liked_pct": float(100.0 * rf_liked.mean()) if not rf_liked.empty else None,
+            "sentiment": _sentiment_score(comments_series),
+            "style": _style,
+        }
 
-            with st.spinner("Generating summary from student reviews... (first time takes ~20s)"):
-                summaries = generate_review_summaries(
-                    course, comments_hash, tuple(comments_list)
-                )
+        comments_list = comments_series.tolist()
+        comments_hash = hashlib.md5(
+            ("||".join(sorted(comments_list)) + str(stats_for_summary)).encode("utf-8")
+        ).hexdigest()
 
-            if summaries["status"] == "no_token":
-                st.info("Add `HF_API_TOKEN` to your Streamlit secrets to enable AI summaries.")
-            elif summaries["status"] == "all_failed":
-                st.warning("Summary service is temporarily unavailable.")
-                errs = summaries.get("errors", [])
-                if errs:
-                    with st.expander("Show error details"):
-                        for e in errs:
-                            st.code(e)
+        with st.spinner("Generating summary..."):
+            summaries = generate_review_summaries(
+                course, comments_hash,
+                tuple(comments_list),
+                tuple(stats_for_summary.items()),
+            )
+
+        # ---- Render: template always; AI on top if available ----
+        with st.container(border=True):
+            st.markdown("### 📝 Summary of student reviews")
+            if summaries.get("ai"):
+                st.write(summaries["ai"])
+                st.caption(summaries["template"])
             else:
-                if summaries.get("overall"):
-                    with st.container(border=True):
-                        st.markdown("### 📝 Summary of student reviews")
-                        st.write(summaries["overall"])
-                        if summaries.get("used_fallback"):
-                            st.caption(
-                                "_Generated locally (HF AI service unavailable) — picks the most "
-                                "representative sentences from the reviews._"
-                            )
+                st.write(summaries["template"])
+                if not st.secrets.get("HF_API_TOKEN"):
+                    st.caption("_Add HF_API_TOKEN to Streamlit secrets for AI-written summaries._")
+                elif comments_list:
+                    st.caption("_AI summary unavailable — based on the structured ratings above._")
 
-                has_breakdown = any([summaries.get("positive"),
-                                     summaries.get("negative"),
-                                     summaries.get("tips")])
-                if has_breakdown:
-                    s1, s2, s3 = st.columns(3)
-                    with s1:
-                        st.markdown("#### 👍 What students loved")
-                        if summaries.get("positive"):
-                            st.write(summaries["positive"])
-                        else:
-                            st.caption("_Nothing clearly positive flagged._")
-                    with s2:
-                        st.markdown("#### 👎 Common complaints")
-                        if summaries.get("negative"):
-                            st.write(summaries["negative"])
-                        else:
-                            st.caption("_Nothing clearly negative flagged._")
-                    with s3:
-                        st.markdown("#### 💡 Tips for success")
-                        if summaries.get("tips"):
-                            st.write(summaries["tips"])
-                        else:
-                            st.caption("_No explicit tips found._")
+        # ---- Per-bucket: AI paragraph OR labeled quotes ----
+        has_breakdown = any([summaries.get("positive"),
+                             summaries.get("negative"),
+                             summaries.get("tips")])
+        if has_breakdown:
+            s1, s2, s3 = st.columns(3)
 
-                st.divider()
+            def _render_bucket(col, header, key):
+                with col:
+                    st.markdown(header)
+                    val = summaries.get(key)
+                    is_quotes = summaries.get(f"{key}_is_quotes", False)
+                    if not val:
+                        empty_msg = {
+                            "positive": "_Nothing clearly positive flagged._",
+                            "negative": "_Nothing clearly negative flagged._",
+                            "tips":     "_No explicit tips found._",
+                        }[key]
+                        st.caption(empty_msg)
+                        return
+                    if is_quotes:
+                        st.caption("_Direct quotes from reviewers:_")
+                        for q in val:
+                            q_short = q.strip()
+                            if len(q_short) > 240:
+                                q_short = q_short[:240].rstrip() + "…"
+                            st.markdown(f"> {q_short}")
+                    else:
+                        st.write(val)
+
+            _render_bucket(s1, "#### 👍 What students loved", "positive")
+            _render_bucket(s2, "#### 👎 Common complaints", "negative")
+            _render_bucket(s3, "#### 💡 Tips for success", "tips")
+
+        # Error details (optional, only if anything failed)
+        errs = summaries.get("errors", [])
+        if errs:
+            with st.expander("AI service notes (debug)"):
+                for e in errs:
+                    st.code(e)
+
+        st.divider()
 
         # ---- REVIEW CARDS GROUPED BY PROFESSOR ----
         if filtered_n == 0:
