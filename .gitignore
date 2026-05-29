@@ -1,0 +1,19 @@
+# Secrets — never commit
+.streamlit/secrets.toml
+*.json
+!package.json
+!package-lock.json
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
