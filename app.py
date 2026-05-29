@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import gspread
 from google.oauth2.service_account import Credentials
-from streamlit_autorefresh import st_autorefresh
 import plotly.express as px
 import plotly.graph_objects as go
 from collections import Counter
@@ -13,7 +12,6 @@ from datetime import datetime
 from difflib import SequenceMatcher
 
 st.set_page_config(page_title="Course Decision Dashboard", layout="wide")
-st_autorefresh(interval=30_000, key="autorefresh")
 
 # ---- Color-code the three top-level tabs ----
 # Streamlit tabs render as <button data-baseweb="tab"> inside a [role="tablist"]
