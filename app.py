@@ -22,38 +22,40 @@ st_autorefresh(interval=30_000, key="autorefresh")
 st.markdown(
     """
     <style>
-    /* Add a little space so colored tabs breathe */
-    div[role="tablist"] > button[data-baseweb="tab"] {
-        border-radius: 8px 8px 0 0;
-        padding: 8px 18px;
-        margin-right: 4px;
-        font-weight: 600;
-        border-bottom: 3px solid transparent;
-        transition: background-color 0.15s ease;
+    /* ---- Tab visual polish (applies to all tab-lists) ---- */
+    [data-baseweb="tab-list"] > button[data-baseweb="tab"] {
+        border-radius: 8px 8px 0 0 !important;
+        padding: 8px 18px !important;
+        margin-right: 4px !important;
+        font-weight: 600 !important;
+        border-bottom: 3px solid transparent !important;
+        transition: background-color 0.15s ease !important;
     }
-    /* Only target the FIRST tablist on the page (top-level main tabs).
-       :nth-of-type targets within parent. Streamlit wraps each tablist
-       so we use the page-level tabs container. */
-    section.main div[role="tablist"]:first-of-type > button[data-baseweb="tab"]:nth-of-type(1) {
-        background-color: #e8eef7;   /* Columbia-blue tint */
+
+    /* ---- Color-code main tabs.
+       Scope: only tab-lists NOT inside a tab-panel (i.e. top-level page tabs).
+       This excludes the nested per-professor tabs which live inside
+       [data-baseweb="tab-panel"]. ---- */
+    [data-baseweb="tab-list"]:not([data-baseweb="tab-panel"] [data-baseweb="tab-list"]) > button[data-baseweb="tab"]:nth-of-type(1) {
+        background-color: #e8eef7 !important;
     }
-    section.main div[role="tablist"]:first-of-type > button[data-baseweb="tab"]:nth-of-type(1)[aria-selected="true"] {
-        background-color: #cdd9ef;
-        border-bottom-color: #012169;
+    [data-baseweb="tab-list"]:not([data-baseweb="tab-panel"] [data-baseweb="tab-list"]) > button[data-baseweb="tab"]:nth-of-type(1)[aria-selected="true"] {
+        background-color: #cdd9ef !important;
+        border-bottom-color: #012169 !important;
     }
-    section.main div[role="tablist"]:first-of-type > button[data-baseweb="tab"]:nth-of-type(2) {
-        background-color: #eaf5ee;   /* soft green */
+    [data-baseweb="tab-list"]:not([data-baseweb="tab-panel"] [data-baseweb="tab-list"]) > button[data-baseweb="tab"]:nth-of-type(2) {
+        background-color: #eaf5ee !important;
     }
-    section.main div[role="tablist"]:first-of-type > button[data-baseweb="tab"]:nth-of-type(2)[aria-selected="true"] {
-        background-color: #c8e6d3;
-        border-bottom-color: #1e8449;
+    [data-baseweb="tab-list"]:not([data-baseweb="tab-panel"] [data-baseweb="tab-list"]) > button[data-baseweb="tab"]:nth-of-type(2)[aria-selected="true"] {
+        background-color: #c8e6d3 !important;
+        border-bottom-color: #1e8449 !important;
     }
-    section.main div[role="tablist"]:first-of-type > button[data-baseweb="tab"]:nth-of-type(3) {
-        background-color: #fdf2e6;   /* soft amber */
+    [data-baseweb="tab-list"]:not([data-baseweb="tab-panel"] [data-baseweb="tab-list"]) > button[data-baseweb="tab"]:nth-of-type(3) {
+        background-color: #fdf2e6 !important;
     }
-    section.main div[role="tablist"]:first-of-type > button[data-baseweb="tab"]:nth-of-type(3)[aria-selected="true"] {
-        background-color: #f7dab9;
-        border-bottom-color: #c75b12;
+    [data-baseweb="tab-list"]:not([data-baseweb="tab-panel"] [data-baseweb="tab-list"]) > button[data-baseweb="tab"]:nth-of-type(3)[aria-selected="true"] {
+        background-color: #f7dab9 !important;
+        border-bottom-color: #c75b12 !important;
     }
     </style>
     """,
@@ -1136,7 +1138,7 @@ st.title("Course Decision Dashboard")
 st.caption("Built from student responses (auto-refreshes). Use filters in the sidebar.")
 
 tab_overview, tab_deep, tab_compare = st.tabs(
-    ["📊 Overview (Rankings)", "🔍 Course Deep Dive", "⚖️ Compare Courses"]
+    ["🟦 📊 Overview (Rankings)", "🟩 🔍 Course Deep Dive", "🟧 ⚖️ Compare Courses"]
 )
 
 
