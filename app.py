@@ -1720,61 +1720,52 @@ with tab_compare:
             comp = filtered[filtered[COURSE_COL].isin(selected)].copy()
             summary = compute_course_summary(comp).set_index("Course").loc[selected].reset_index()
 
-            # ---- Quick-read metric cards at top ----
-            st.markdown("#### At a glance")
+            # ---- At a glance: metadata + inline mini-bars (combines old 'At a glance' + 'Head-to-head' sections) ----
+            st.markdown("#### 📊 At a glance")
+            st.caption("Each course shows Type, Style, and inline bars for Usefulness, Difficulty, and Liked.")
+
+            def _mini_bar_html(label: str, value, suffix: str, color: str, max_val: float = 10.0) -> str:
+                if value is None or pd.isna(value):
+                    return (
+                        f"<div style='margin:8px 0;'><div style='display:flex;justify-content:space-between;"
+                        f"font-size:0.85rem;color:#666;'><span>{label}</span><span>—</span></div></div>"
+                    )
+                pct = max(0.0, min(100.0, 100.0 * value / max_val))
+                if suffix == "%":
+                    val_str = f"{value:.0f}%"
+                else:
+                    val_str = f"{value:.1f}{suffix}"
+                return (
+                    f"<div style='margin:8px 0;'>"
+                    f"<div style='display:flex;justify-content:space-between;font-size:0.85rem;'>"
+                    f"<span>{label}</span><span><b>{val_str}</b></span></div>"
+                    f"<div style='background:#eef0f3;border-radius:4px;height:10px;overflow:hidden;margin-top:3px;'>"
+                    f"<div style='background:{color};width:{pct:.1f}%;height:100%;'></div></div>"
+                    f"</div>"
+                )
+
             cols = st.columns(len(selected))
             for i, course in enumerate(selected):
                 row = summary[summary["Course"] == course].iloc[0]
+                ctype = classify_course_type(course)
+                cstyle = row.get("style", "Unknown")
                 with cols[i]:
                     with st.container(border=True):
                         st.markdown(f"**{course}**")
-                        st.caption(f"{classify_course_type(course)} · {int(row['n'])} reviews · {row['confidence']} confidence")
-                        st.metric("Usefulness", f"{row['avg_use']:.1f}/10" if not pd.isna(row['avg_use']) else "—")
-                        st.metric("Difficulty", f"{row['avg_diff']:.1f}/10" if not pd.isna(row['avg_diff']) else "—")
-                        st.metric("Liked", f"{row['liked_pct']:.0f}%" if not pd.isna(row['liked_pct']) else "—")
-
-            st.divider()
-
-            # ---- Grouped bar comparison (replaces oversized donut grids) ----
-            st.markdown("#### 🎯 Head-to-head metrics")
-            st.caption(
-                "Horizontal bars on the same 0–10 scale. Liked % is shown out of 10 "
-                "(e.g. 80% → 8) so all three metrics line up."
-            )
-            bar_df = summary.copy()
-            bar_df["Liked (0–10)"] = bar_df["liked_pct"] / 10.0
-            bar_long = bar_df.melt(
-                id_vars=["Course"],
-                value_vars=["avg_use", "avg_diff", "Liked (0–10)"],
-                var_name="Metric",
-                value_name="Score",
-            )
-            metric_label = {
-                "avg_use": "Usefulness",
-                "avg_diff": "Difficulty",
-                "Liked (0–10)": "Liked",
-            }
-            bar_long["Metric"] = bar_long["Metric"].map(metric_label)
-            bar_fig = px.bar(
-                bar_long,
-                x="Score", y="Course", color="Metric",
-                orientation="h", barmode="group",
-                range_x=[0, 10],
-                color_discrete_map={
-                    "Usefulness": "#2E86DE",
-                    "Difficulty": "#E67E22",
-                    "Liked": "#27AE60",
-                },
-                text=bar_long["Score"].map(lambda v: "—" if pd.isna(v) else f"{v:.1f}"),
-            )
-            bar_fig.update_traces(textposition="outside", cliponaxis=False)
-            bar_fig.update_layout(
-                height=max(220, 90 * len(selected) + 80),
-                margin=dict(l=20, r=20, t=20, b=20),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-                yaxis=dict(autorange="reversed"),
-            )
-            st.plotly_chart(bar_fig, use_container_width=True)
+                        # Type + Style chips
+                        chips = f"{type_badge(ctype)} {style_badge(cstyle)}"
+                        st.markdown(
+                            f"<div style='margin:4px 0 6px 0;'>{chips}</div>",
+                            unsafe_allow_html=True,
+                        )
+                        st.caption(f"{int(row['n'])} reviews · {row['confidence']} confidence")
+                        # Three colored inline bars
+                        bars_html = (
+                            _mini_bar_html("Usefulness", row["avg_use"], "/10", "#2E86DE") +
+                            _mini_bar_html("Difficulty", row["avg_diff"], "/10", "#E67E22") +
+                            _mini_bar_html("Liked",      row["liked_pct"], "%",  "#27AE60", max_val=100.0)
+                        )
+                        st.markdown(bars_html, unsafe_allow_html=True)
 
             st.divider()
 
