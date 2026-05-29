@@ -106,12 +106,35 @@ STYLE_COLORS = {
     "Unknown":          "#95a5a6",
 }
 
-# Comment-text fallback patterns used when the assignments checkbox is empty
+# Manual style overrides for courses we know about from personal experience.
+# Keys are lowercased substrings of the Course name; the first match wins.
+# Highest-priority signal (beats checkbox data and comment-text fallback).
+MANUAL_STYLE_OVERRIDES = {
+    "applied deep learning": "Exam-driven",
+}
+
+# Comment-text fallback patterns used when the assignments checkbox is empty.
+# Broad on purpose — these are signals not certainties; the classifier picks the top hit.
 _STYLE_TEXT_HINTS = {
-    "exam":    [r"\bmidterm\b", r"\bfinal exam\b", r"\bexams?\b"],
-    "project": [r"\bfinal project\b", r"\bprojects?\b", r"\bcapstone\b"],
-    "pset":    [r"\bproblem sets?\b", r"\bpsets?\b", r"\bhomework\b", r"\bhw\b"],
-    "reading": [r"\breadings?\b", r"\bpapers?\b"],
+    "exam": [
+        r"\bmidterm\b", r"\bfinals?\b", r"\bfinal exam\b", r"\bexams?\b",
+        r"\btests?\b", r"\bquizz?es?\b", r"\bquiz\b",
+        r"\bstudy hard\b", r"\bstudy for\b", r"\bproctor",
+        r"\bopen book\b", r"\bclosed book\b", r"\bcurve\b", r"\bcurved\b",
+    ],
+    "project": [
+        r"\bfinal project\b", r"\bprojects?\b", r"\bcapstone\b",
+        r"\bbuilt?\b", r"\bimplement(?:ation|ed|ing)?\b",
+        r"\bdeliverables?\b", r"\bcheckpoints?\b",
+        r"\bteam project\b", r"\bgroup project\b",
+    ],
+    "pset": [
+        r"\bproblem sets?\b", r"\bpsets?\b", r"\bhomeworks?\b", r"\bhws?\b",
+        r"\bassignments?\b", r"\bweekly\b",
+    ],
+    "reading": [
+        r"\breadings?\b", r"\bpapers?\b", r"\bdiscussion\b", r"\bdiscussions\b",
+    ],
 }
 
 def _infer_style_from_text(comments: list[str]) -> dict[str, int]:
@@ -128,12 +151,21 @@ def _infer_style_from_text(comments: list[str]) -> dict[str, int]:
 
 
 def classify_style(comp_freq: dict, n_reviews: int,
-                   comment_hints: dict | None = None) -> str:
+                   comment_hints: dict | None = None,
+                   course_name: str | None = None) -> str:
     """comp_freq: {component: count} from the checkbox field.
     comment_hints: optional {exam/project/pset/reading: count} from comment text fallback.
+    course_name: if given, checks MANUAL_STYLE_OVERRIDES first.
     Returns a style label."""
     if n_reviews == 0:
         return "Unknown"
+
+    # Highest priority: manual override (we know better than the data)
+    if course_name:
+        cn_low = course_name.lower()
+        for pat, style in MANUAL_STYLE_OVERRIDES.items():
+            if pat in cn_low:
+                return style
 
     # Primary signal: checkbox data
     if comp_freq:
@@ -513,7 +545,7 @@ def compute_course_summary(df: pd.DataFrame) -> pd.DataFrame:
                 if COMMENTS_COL in sub.columns else []
             )
             hints = _infer_style_from_text(comments) if comments else None
-            return classify_style(dict(counts), len(sub), hints)
+            return classify_style(dict(counts), len(sub), hints, course_name=course_name)
         summary["style"] = summary["Course"].apply(_style_for_course).values
     else:
         summary["style"] = "Unknown"
@@ -1294,7 +1326,7 @@ with tab_deep:
             if COMMENTS_COL in f.columns else []
         )
         _style_hints = _infer_style_from_text(comments_for_hints) if comments_for_hints else None
-        _style = classify_style(dict(comp_counts), n, _style_hints)
+        _style = classify_style(dict(comp_counts), n, _style_hints, course_name=course)
 
         st.markdown(
             f"<div style='margin: 4px 0 10px 0;'>"
