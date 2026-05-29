@@ -714,11 +714,19 @@ def _extractive_summary(text: str, max_sentences: int = 3, max_chars: int = 480)
     return " ".join(chosen)[:max_chars]
 
 
-def _hf_chat_summarize(prompt: str, hf_token: str, timeout: int = 30):
+def _hf_chat_summarize(prompt: str, hf_token: str, timeout: int = 30,
+                       system_msg: str | None = None, max_tokens: int = 180):
     """Use HF Router chat completion (the current free-tier endpoint).
     Returns (text, status) where status is 'ok' | 'error: ...'."""
     if not hf_token:
         return None, "error: no token"
+    default_system = (
+        "You write concise, neutral summaries of student course reviews in the "
+        "style of an Amazon product review summary. Always start with 'Students "
+        "find this course' or 'Reviewers say'. Synthesize the overall sentiment "
+        "— do not quote a single review. Maximum 3 sentences. No bullet points."
+    )
+    sys_msg = system_msg or default_system
     try:
         import requests
         # HF Router routes to whichever provider currently serves a given model
@@ -737,19 +745,10 @@ def _hf_chat_summarize(prompt: str, hf_token: str, timeout: int = 30):
                     json={
                         "model": model,
                         "messages": [
-                            {
-                                "role": "system",
-                                "content": (
-                                    "You write concise, neutral summaries of student course "
-                                    "reviews in the style of an Amazon product review summary. "
-                                    "Always start with 'Students find this course' or 'Reviewers say'. "
-                                    "Synthesize the overall sentiment — do not quote a single review. "
-                                    "Maximum 3 sentences. No bullet points."
-                                ),
-                            },
+                            {"role": "system", "content": sys_msg},
                             {"role": "user", "content": prompt[:3500]},
                         ],
-                        "max_tokens": 180,
+                        "max_tokens": max_tokens,
                         "temperature": 0.2,
                     },
                     timeout=timeout,
@@ -894,26 +893,49 @@ def generate_review_summaries(course: str, comments_hash: str,
         else:
             result["errors"].append(f"overall: {status}")
 
-    # ---- Per-bucket: AI-summarize if 3+ comments, else show as quotes ----
+    # ---- Per-bucket: AI-extract bullets if 2+ comments, else show as quote ----
     bucket_to_key = {"positive": "positive", "negative": "negative", "tip": "tips"}
     bucket_intro = {
-        "positive": "Summarize what students LOVED about this course in 1-2 sentences:",
-        "negative": "Summarize the COMMON COMPLAINTS in 1-2 sentences:",
-        "tip":      "Summarize the practical TIPS students give in 1-2 sentences:",
+        "positive": (
+            "From the student reviews below, extract 2-4 SHORT bullet points "
+            "(max 12 words each) of what students consistently LOVED about this course. "
+            "Use '- ' at the start of each bullet. No introduction, no conclusion, "
+            "just the bullets:"
+        ),
+        "negative": (
+            "From the student reviews below, extract 2-4 SHORT bullet points "
+            "(max 12 words each) of COMMON COMPLAINTS about this course. "
+            "Use '- ' at the start of each bullet. No introduction, no conclusion, "
+            "just the bullets:"
+        ),
+        "tip": (
+            "From the student reviews below, extract 2-4 SHORT, actionable TIPS "
+            "(max 12 words each) for doing well in this course. "
+            "Use '- ' at the start of each bullet. No introduction, no conclusion, "
+            "just the bullets:"
+        ),
     }
     for bkey, out_key in bucket_to_key.items():
         bucket = buckets[bkey]
         if not bucket:
             continue
-        if hf_token and len(bucket) >= 3:
+        if hf_token and len(bucket) >= 2:
             prompt = bucket_intro[bkey] + "\n\n" + "\n---\n".join(bucket)
-            text, status = _hf_chat_summarize(prompt, hf_token)
+            bullet_system = (
+                "You extract short, concrete bullet points from student course reviews. "
+                "Output ONLY markdown bullets starting with '- '. No introduction, no "
+                "conclusion, no headers. Max 12 words per bullet. 2-4 bullets total. "
+                "Deduplicate similar points."
+            )
+            text, status = _hf_chat_summarize(
+                prompt, hf_token, system_msg=bullet_system, max_tokens=200,
+            )
             if status == "ok":
                 result[out_key] = text
                 continue
             result["errors"].append(f"{bkey}: {status}")
-        # Fallback: show comments as labeled quotes (not pretend-summarize)
-        result[out_key] = bucket[:2]   # raw list, UI will format
+        # Fallback: show single comment as a labeled quote (nothing to summarize from 1 sentence)
+        result[out_key] = bucket[:2]
         result[out_key + "_is_quotes"] = True
 
     return result
