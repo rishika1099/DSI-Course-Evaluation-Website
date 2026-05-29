@@ -1171,13 +1171,27 @@ with tab_overview:
 
         # Sort by # reviews descending — most-reviewed (highest signal) first
         show = summary.sort_values("n", ascending=False).copy()
+
+        def _format_with_median(mean_val, med_val) -> str:
+            """Show '7.4' normally; show '8.5 ↑ 10' or '5.0 ↓ 3' when median
+            meaningfully disagrees with mean (|delta| >= 1.0). Surfaces only
+            the cases where outliers are skewing the average."""
+            if pd.isna(mean_val):
+                return "—"
+            base = f"{mean_val:.1f}"
+            if pd.isna(med_val):
+                return base
+            delta = med_val - mean_val
+            if abs(delta) < 1.0:
+                return base
+            arrow = "↑" if delta > 0 else "↓"
+            return f"{base} {arrow} {med_val:.0f}"
+
         show["avg_use_disp"] = show.apply(
-            lambda r: "—" if pd.isna(r["avg_use"]) else f"{r['avg_use']:.1f} (med {r['med_use']:.0f})",
-            axis=1,
+            lambda r: _format_with_median(r["avg_use"], r["med_use"]), axis=1,
         )
         show["avg_diff_disp"] = show.apply(
-            lambda r: "—" if pd.isna(r["avg_diff"]) else f"{r['avg_diff']:.1f} (med {r['med_diff']:.0f})",
-            axis=1,
+            lambda r: _format_with_median(r["avg_diff"], r["med_diff"]), axis=1,
         )
         show["liked_disp"] = show["liked_pct"].map(lambda x: "—" if pd.isna(x) else f"{x:.0f}%")
 
@@ -1230,13 +1244,17 @@ with tab_overview:
                 "Useful": st.column_config.TextColumn(
                     "Useful",
                     help=(
-                        "Average usefulness rating (1-10). Median in parens — if mean and "
-                        "median disagree, a few outliers are pulling the average."
+                        "Average usefulness rating (1-10). If outliers are pulling the average, "
+                        "an arrow appears with the median: '↑ 10' means most students rated higher "
+                        "than the average; '↓ 3' means most rated lower."
                     ),
                 ),
                 "Difficult": st.column_config.TextColumn(
                     "Difficult",
-                    help="Average difficulty (1-10). Median in parens. 10 = very hard.",
+                    help=(
+                        "Average difficulty rating (1-10, 10 = very hard). If outliers are skewing, "
+                        "an arrow appears with the median."
+                    ),
                 ),
                 "Liked": st.column_config.TextColumn(
                     "Liked",
