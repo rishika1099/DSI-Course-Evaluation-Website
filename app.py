@@ -1262,6 +1262,13 @@ with tab_overview:
                 ),
             },
         )
+        st.caption(
+            "**Useful** and **Difficult** show the average rating. "
+            "An arrow appears only when outliers are skewing that average — "
+            "e.g. **`8.5 ↑ 10`** means the average is 8.5 but most students rated it 10 "
+            "(the course is probably *better* than the average suggests). "
+            "**`5.0 ↓ 3`** means most rated it 3 but a few high ratings pulled the average up."
+        )
 
         # ---- Bubble chart (replaces the bar plot) ----
         st.subheader("Where each course sits")
