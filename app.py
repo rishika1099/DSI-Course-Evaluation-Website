@@ -1950,8 +1950,6 @@ with tab_compare:
                         continue
                     top = pool.sort_values("_clen", ascending=False).iloc[0]
                     cmt = str(top.get(COMMENTS_COL, "")).strip()
-                    if len(cmt) > 320:
-                        cmt = cmt[:320].rstrip() + "…"
                     prof = top.get(PROF_COL, "") or "—"
                     sem = top.get(SEM_COL, "") or "—"
                     use_v = top.get(USE_COL, None)
