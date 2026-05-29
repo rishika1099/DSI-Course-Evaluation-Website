@@ -1873,8 +1873,8 @@ with tab_compare:
                     "**🎯 Bottom line:** <one sentence: who should pick which course>\n\n"
                     "Then for each course, one block:\n\n"
                     "**<Course Name>**\n"
-                    "- ✓ Best for: <one specific line, max 14 words>\n"
-                    "- ⚠ Watch out: <one specific line, max 14 words>\n\n"
+                    "- ✅ Best for: <one specific line, max 14 words>\n"
+                    "- ⚠️ Watch out: <one specific line, max 14 words>\n\n"
                     "Do NOT add an introduction or conclusion outside this structure."
                 )
                 system = (
@@ -1916,18 +1916,54 @@ with tab_compare:
                             st.markdown(f"**{course}**")
                             tags = []
                             if not pd.isna(s["avg_use"]) and s["avg_use"] >= 8:
-                                tags.append("✓ Highly useful")
+                                tags.append("✅ Highly useful")
                             if not pd.isna(s["avg_diff"]) and s["avg_diff"] <= 4:
-                                tags.append("✓ Manageable workload")
+                                tags.append("✅ Manageable workload")
                             elif not pd.isna(s["avg_diff"]) and s["avg_diff"] >= 8:
-                                tags.append("⚠ Very challenging")
+                                tags.append("⚠️ Very challenging")
                             if not pd.isna(s["liked_pct"]) and s["liked_pct"] >= 80:
-                                tags.append("✓ Strong recommendation")
+                                tags.append("✅ Strong recommendation")
                             elif not pd.isna(s["liked_pct"]) and s["liked_pct"] < 50:
-                                tags.append("⚠ Mixed reception")
+                                tags.append("⚠️ Mixed reception")
                             if s["n"] < 3:
-                                tags.append("⚠ Few reviews — interpret cautiously")
+                                tags.append("⚠️ Few reviews — interpret cautiously")
                             for t in tags:
                                 st.markdown(f"- {t}")
                             if not tags:
                                 st.caption("_No standout signal yet._")
+
+            # ---- 🌟 Highlights: one curated 'good' comment per course ----
+            st.markdown("")
+            st.subheader("🌟 Highlights from reviewers")
+            st.caption("One standout comment per course — picked from reviewers who recommended it.")
+
+            hcols = st.columns(min(4, len(selected)))
+            hcol_iter = [hcols[i] for i in range(len(selected))]
+            for col, course in zip(hcol_iter, selected):
+                fc = comp[comp[COURSE_COL] == course].copy()
+                if COMMENTS_COL not in fc.columns:
+                    with col:
+                        st.markdown(f"**{course}**")
+                        st.caption("_No comments._")
+                    continue
+
+                fc["_clen"] = fc[COMMENTS_COL].fillna("").astype(str).str.len()
+                # Prefer reviewers who liked the course AND have a substantive comment
+                liked_pool = fc[(fc.get(LIKED_COL, False) == True) & (fc["_clen"] >= 60)]
+                pool = liked_pool if not liked_pool.empty else fc[fc["_clen"] >= 60]
+
+                with col:
+                    st.markdown(f"**{course}**")
+                    if pool.empty:
+                        st.caption("_No substantive recommended comments yet._")
+                        continue
+                    top = pool.sort_values("_clen", ascending=False).iloc[0]
+                    cmt = str(top.get(COMMENTS_COL, "")).strip()
+                    if len(cmt) > 320:
+                        cmt = cmt[:320].rstrip() + "…"
+                    prof = top.get(PROF_COL, "") or "—"
+                    sem = top.get(SEM_COL, "") or "—"
+                    use_v = top.get(USE_COL, None)
+                    use_s = "—" if pd.isna(use_v) else f"{use_v:.0f}/10"
+                    st.caption(f"_Prof. {prof} · {sem} · Useful {use_s}_")
+                    st.markdown(f"> {cmt}")
