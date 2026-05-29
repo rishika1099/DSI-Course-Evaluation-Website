@@ -1138,7 +1138,7 @@ st.title("Course Decision Dashboard")
 st.caption("Built from student responses (auto-refreshes). Use filters in the sidebar.")
 
 tab_overview, tab_deep, tab_compare = st.tabs(
-    ["📊 Overview (Rankings)", "🔍 Course Deep Dive", "⚖️ Compare Courses"]
+    ["📊 Overview (Rankings)", "🦁 Course Deep Dive", "⚖️ Compare Courses"]
 )
 
 
