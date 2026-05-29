@@ -110,7 +110,10 @@ STYLE_COLORS = {
 # Keys are lowercased substrings of the Course name; the first match wins.
 # Highest-priority signal (beats checkbox data and comment-text fallback).
 MANUAL_STYLE_OVERRIDES = {
-    "applied deep learning": "Exam-driven",
+    "applied deep learning":   "Exam-driven",
+    "probability & statistics":"Exam-driven",
+    "probability and statistics":"Exam-driven",
+    "causal inference":        "Exam-driven",
 }
 
 # Comment-text fallback patterns used when the assignments checkbox is empty.
