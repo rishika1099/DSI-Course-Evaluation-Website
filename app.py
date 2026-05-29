@@ -52,6 +52,66 @@ def classify_course_type(course_value: str) -> str:
     return "Elective"
 
 
+# ---- Visual palette ----
+TYPE_COLORS = {"Core": "#012169", "Elective": "#75AADB"}          # Columbia blue + lighter
+TERM_COLORS = {"Fall": "#C75B12", "Spring": "#2E8B57",
+               "Summer": "#E0A800", "Winter": "#4A6FA5"}
+
+def type_badge(course_type: str) -> str:
+    color = TYPE_COLORS.get(course_type, "#888")
+    return (
+        f"<span style='background:{color}; color:#fff; padding:2px 10px; "
+        f"border-radius:10px; font-size:0.8rem; font-weight:600;'>{course_type}</span>"
+    )
+
+def term_badge(term: str) -> str:
+    color = TERM_COLORS.get(term, "#888")
+    return (
+        f"<span style='background:{color}; color:#fff; padding:2px 8px; "
+        f"border-radius:8px; font-size:0.75rem; font-weight:600;'>{term}</span>"
+    )
+
+def component_chip(label: str, pct: int | None = None) -> str:
+    pct_str = f" · {pct}%" if pct is not None else ""
+    return (
+        f"<span style='background:#eef2ff; color:#1e3a8a; padding:3px 10px; "
+        f"border-radius:12px; font-size:0.78rem; margin:2px 4px 2px 0; "
+        f"display:inline-block; border:1px solid #c7d2fe;'>{label}{pct_str}</span>"
+    )
+
+
+# ---- Assignment components ----
+KNOWN_COMPONENTS = [
+    "Problem Sets", "Projects", "Midterm Exam", "Final Exam",
+    "Final Project", "Readings", "Presentations",
+]
+_COMPONENT_ALIASES = {
+    "Problem Sets":   [r"problem\s*sets?", r"\bpsets?\b", r"\bhomework\b"],
+    "Projects":       [r"\bprojects?\b"],
+    "Midterm Exam":   [r"midterm"],
+    "Final Exam":     [r"final\s*exam"],
+    "Final Project":  [r"final\s*project"],
+    "Readings":       [r"\breadings?\b", r"\bpapers?\b"],
+    "Presentations":  [r"presentations?"],
+}
+
+def parse_components(s) -> set:
+    if not isinstance(s, str) or not s.strip():
+        return set()
+    low = s.lower()
+    found = set()
+    for label, patterns in _COMPONENT_ALIASES.items():
+        for pat in patterns:
+            if re.search(pat, low):
+                found.add(label)
+                break
+    # Avoid double-counting: if "Final Project" matched, don't also infer "Final Exam"
+    # from the bare word "final".
+    if "Final Project" in found and "Final Exam" in found and "final exam" not in low:
+        found.discard("Final Exam")
+    return found
+
+
 # ---------- Professor name normalization ----------
 _PROF_PREFIX_RE = re.compile(r"^\s*(prof\.?|professor|dr\.?|mr\.?|ms\.?|mrs\.?)\s+", re.IGNORECASE)
 
@@ -148,6 +208,14 @@ def load_data(sheet_id: str, worksheet_name: str) -> pd.DataFrame:
     if COURSE_COL in df.columns:
         df = df[df[COURSE_COL].notna() & (df[COURSE_COL].astype(str).str.strip() != "")]
 
+    # If respondent picked "Other" for Course, fall back to the free-text Course Name
+    if COURSE_COL in df.columns and COURSE_NAME_COL in df.columns:
+        course_str = df[COURSE_COL].astype(str).str.strip()
+        name_str = df[COURSE_NAME_COL].astype(str).str.strip()
+        is_other = course_str.str.lower().isin(["other", "other:", "others"])
+        has_name = name_str.ne("") & name_str.str.lower().ne("nan")
+        df.loc[is_other & has_name, COURSE_COL] = name_str[is_other & has_name]
+
     if COURSE_COL in df.columns:
         df["course_type"] = df[COURSE_COL].astype(str).map(classify_course_type)
     else:
@@ -157,6 +225,21 @@ def load_data(sheet_id: str, worksheet_name: str) -> pd.DataFrame:
         df["_prof_key"] = df[PROF_COL].apply(_prof_normalize_key)
     else:
         df["_prof_key"] = ""
+
+    # Derive term (Fall/Spring) and year from the semester column
+    if SEM_COL in df.columns:
+        sem_str = df[SEM_COL].astype(str)
+        df["_term"] = sem_str.str.extract(r"(?i)(Fall|Spring|Summer|Winter)", expand=False).str.title()
+        df["_year"] = pd.to_numeric(sem_str.str.extract(r"(\d{4})", expand=False), errors="coerce")
+    else:
+        df["_term"] = pd.NA
+        df["_year"] = pd.NA
+
+    # Parse assignment components from the multi-select field
+    if ASSIGN_COL in df.columns:
+        df["_components"] = df[ASSIGN_COL].apply(parse_components)
+    else:
+        df["_components"] = [set() for _ in range(len(df))]
 
     return df
 
@@ -331,6 +414,7 @@ def _bucket_comments(comments):
 def _hf_summarize(text: str, hf_token: str,
                   max_length: int = 120, min_length: int = 30,
                   timeout: int = 60):
+    """Returns (summary, status) where status is 'ok' | 'empty' | 'error: <details>'."""
     if not text.strip():
         return None, "empty"
 
@@ -340,8 +424,7 @@ def _hf_summarize(text: str, hf_token: str,
     try:
         from huggingface_hub import InferenceClient
     except ImportError:
-        print("[HF summarize error] huggingface_hub not installed. Run: pip install huggingface_hub")
-        return None, "error"
+        return None, "error: huggingface_hub not installed"
 
     try:
         client = InferenceClient(
@@ -366,11 +449,9 @@ def _hf_summarize(text: str, hf_token: str,
             summary = result.get("generated_text") or result.get("summary_text")
         if summary:
             return summary.strip(), "ok"
-        print(f"[HF summarize error] Unexpected result shape: {type(result).__name__} -> {result!r}")
-        return None, "error"
+        return None, f"error: unexpected result shape ({type(result).__name__})"
     except Exception as e:
-        print(f"[HF summarize error] {type(e).__name__}: {e}")
-        return None, "error"
+        return None, f"error: {type(e).__name__}: {e}"
 
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
@@ -382,12 +463,15 @@ def generate_review_summaries(course: str, comments_hash: str, comments_tuple: t
 
     comments = list(comments_tuple)
     result = {"overall": None, "positive": None,
-              "negative": None, "tips": None, "status": "ok"}
+              "negative": None, "tips": None,
+              "status": "ok", "errors": []}
 
     all_text = " ".join(comments)
     overall, status = _hf_summarize(all_text, hf_token, max_length=140, min_length=50)
     if status == "ok":
         result["overall"] = overall
+    elif status.startswith("error"):
+        result["errors"].append(f"overall: {status}")
 
     buckets = _bucket_comments(comments)
     for key in ["positive", "negative", "tip"]:
@@ -399,6 +483,8 @@ def generate_review_summaries(course: str, comments_hash: str, comments_tuple: t
         if sub_status == "ok":
             out_key = "tips" if key == "tip" else key
             result[out_key] = summary
+        elif sub_status.startswith("error"):
+            result["errors"].append(f"{key}: {sub_status}")
 
     if not any([result["overall"], result["positive"],
                 result["negative"], result["tips"]]):
@@ -456,14 +542,19 @@ def _render_review_cards(df_slice: pd.DataFrame):
         use = row.get(USE_COL, None)
         liked = row.get(LIKED_COL, None)
         comment = row.get(COMMENTS_COL, "") or ""
+        term = row.get("_term", None)
 
         liked_str = "👍 Yes" if liked is True else ("👎 No" if liked is False else "—")
         diff_str = "—" if pd.isna(diff) else f"{diff:.0f}/10"
         use_str = "—" if pd.isna(use) else f"{use:.0f}/10"
+        term_html = term_badge(term) + " " if isinstance(term, str) and term else ""
 
         with st.container(border=True):
             h1, h2, h3, h4 = st.columns([2.5, 1.3, 1.3, 1.3])
-            h1.caption(f"**{sem}** · {ts}")
+            h1.markdown(
+                f"{term_html}<span style='color:#555;'>{sem} · {ts}</span>",
+                unsafe_allow_html=True,
+            )
             h2.markdown(f"**Useful:** {use_str}")
             h3.markdown(f"**Difficulty:** {diff_str}")
             h4.markdown(f"**Recommend:** {liked_str}")
@@ -481,6 +572,17 @@ if df.empty:
     st.stop()
 
 # ========== SIDEBAR ==========
+st.sidebar.image("assets/dsi_council_logo.png", use_container_width=True)
+st.sidebar.markdown(
+    "<div style='text-align:center; margin-top:-6px; margin-bottom:14px;'>"
+    "<a href='https://docs.google.com/forms/d/e/1FAIpQLScfC3rpdgzNHFrP0D287wZ1N704PdnRB84mr_mqnxiqzkMhJA/viewform' "
+    "target='_blank' rel='noopener' "
+    "style='display:inline-block; background:#012169; color:#fff; padding:7px 14px; "
+    "border-radius:6px; text-decoration:none; font-weight:600; font-size:0.85rem;'>"
+    "📝 Submit an Evaluation</a></div>",
+    unsafe_allow_html=True,
+)
+st.sidebar.divider()
 st.sidebar.header("Filters")
 
 course_search = st.sidebar.text_input(
@@ -499,6 +601,18 @@ course_type_filter = st.sidebar.multiselect(
     "Course Type",
     ["Core", "Elective"],
     default=["Core", "Elective"],
+)
+
+all_terms = sorted(
+    [t for t in df.get("_term", pd.Series(dtype=str)).dropna().unique().tolist() if t]
+)
+term_filter = st.sidebar.multiselect("Term", all_terms, default=[])
+
+component_filter = st.sidebar.multiselect(
+    "Must have components",
+    KNOWN_COMPONENTS,
+    default=[],
+    help="Show only courses where reviews mention ALL selected components.",
 )
 
 st.sidebar.divider()
@@ -527,12 +641,18 @@ if sem_filter and SEM_COL in filtered.columns:
     filtered = filtered[filtered[SEM_COL].isin(sem_filter)]
 if course_type_filter and "course_type" in filtered.columns:
     filtered = filtered[filtered["course_type"].isin(course_type_filter)]
+if term_filter and "_term" in filtered.columns:
+    filtered = filtered[filtered["_term"].isin(term_filter)]
+if component_filter and "_components" in filtered.columns and COURSE_COL in filtered.columns:
+    needed = set(component_filter)
+    course_comp_union = (
+        filtered.groupby(COURSE_COL)["_components"]
+                .agg(lambda s: set().union(*s) if len(s) else set())
+    )
+    courses_with_all = course_comp_union[course_comp_union.apply(lambda c: needed.issubset(c))].index
+    filtered = filtered[filtered[COURSE_COL].isin(courses_with_all)]
 
 # ========== MAIN ==========
-_logo_l, _logo_c, _logo_r = st.columns([1, 2, 1])
-with _logo_c:
-    st.image("assets/dsi_council_logo.png", use_container_width=True)
-
 st.title("Course Decision Dashboard")
 st.caption("Built from student responses (auto-refreshes). Use filters in the sidebar.")
 
@@ -578,15 +698,27 @@ with tab_overview:
         )
 
         show = summary.sort_values("value_score", ascending=False).copy()
+        # keep numeric copy for styling
+        show_num = show.copy()
         show["avg_use"] = show["avg_use"].map(lambda x: "—" if pd.isna(x) else f"{x:.2f}")
         show["avg_diff"] = show["avg_diff"].map(lambda x: "—" if pd.isna(x) else f"{x:.2f}")
         show["liked_pct"] = show["liked_pct"].map(lambda x: "—" if pd.isna(x) else f"{x:.0f}%")
         show["value_score"] = show["value_score"].map(lambda x: "—" if pd.isna(x) else f"{x:.2f}")
 
-        st.dataframe(
-            show[["Course", "Type", "n", "avg_use", "avg_diff", "liked_pct", "value_score", "confidence"]],
-            use_container_width=True
+        display_cols = ["Course", "Type", "n", "avg_use", "avg_diff", "liked_pct", "value_score", "confidence"]
+
+        def _row_style(row):
+            color = TYPE_COLORS.get(row["Type"], "#888")
+            styles = [""] * len(row)
+            type_idx = list(row.index).index("Type")
+            styles[type_idx] = f"background-color: {color}; color: white; font-weight:600; text-align:center;"
+            return styles
+
+        styler = (
+            show[display_cols]
+            .style.apply(_row_style, axis=1)
         )
+        st.dataframe(styler, use_container_width=True)
 
         # ---- Bubble chart (replaces the bar plot) ----
         st.subheader("Where each course sits")
@@ -648,7 +780,11 @@ with tab_deep:
         st.info("No courses match your filters. Try loosening them in the sidebar.")
     else:
         course = st.selectbox("Select a course", course_options)
-        st.caption(f"Type: **{classify_course_type(course)}**")
+        _ctype = classify_course_type(course)
+        st.markdown(
+            f"<div style='margin: 4px 0 10px 0;'>Type: {type_badge(_ctype)}</div>",
+            unsafe_allow_html=True,
+        )
 
         f = filtered[filtered[COURSE_COL] == course].copy()
         n = len(f)
@@ -694,8 +830,25 @@ with tab_deep:
                     use_container_width=True
                 )
 
-        st.markdown("**Assessment breakdown:** " +
-                    mark_breakdown(f.get(ASSIGN_COL, pd.Series(dtype=str))))
+        # Course component chips (% of reviewers who mentioned each)
+        st.markdown("**Course components**")
+        if "_components" in f.columns and len(f) > 0:
+            comp_counts = Counter()
+            for comps in f["_components"]:
+                for c in comps:
+                    comp_counts[c] += 1
+            total = len(f)
+            if comp_counts:
+                chips_html = "".join(
+                    component_chip(label, pct=int(round(100 * cnt / total)))
+                    for label, cnt in comp_counts.most_common()
+                )
+                st.markdown(f"<div>{chips_html}</div>", unsafe_allow_html=True)
+            else:
+                st.caption("_Not provided._")
+        st.caption(
+            "Raw: " + mark_breakdown(f.get(ASSIGN_COL, pd.Series(dtype=str)))
+        )
 
         st.divider()
 
@@ -753,7 +906,12 @@ with tab_deep:
             if summaries["status"] == "no_token":
                 st.info("Add `HF_API_TOKEN` to your Streamlit secrets to enable AI summaries.")
             elif summaries["status"] == "all_failed":
-                st.warning("Summary service is temporarily unavailable. Check the terminal for error details.")
+                st.warning("Summary service is temporarily unavailable.")
+                errs = summaries.get("errors", [])
+                if errs:
+                    with st.expander("Show error details"):
+                        for e in errs:
+                            st.code(e)
             else:
                 if summaries.get("overall"):
                     with st.container(border=True):
@@ -855,35 +1013,46 @@ with tab_compare:
 
             st.divider()
 
-            # ---- Donut charts per course ----
-            st.markdown("#### 🎯 Scores at a glance")
-            st.caption("Bigger filled portion = better score on that metric.")
-
-            for course in selected:
-                row = summary[summary["Course"] == course].iloc[0]
-                st.markdown(f"**{course}**")
-                d1, d2, d3 = st.columns(3)
-                with d1:
-                    st.plotly_chart(
-                        donut_score("Usefulness",
-                                    None if pd.isna(row["avg_use"]) else float(row["avg_use"])),
-                        use_container_width=True,
-                        key=f"d_use_{course}",
-                    )
-                with d2:
-                    st.plotly_chart(
-                        donut_score("Difficulty",
-                                    None if pd.isna(row["avg_diff"]) else float(row["avg_diff"])),
-                        use_container_width=True,
-                        key=f"d_diff_{course}",
-                    )
-                with d3:
-                    st.plotly_chart(
-                        donut_yesno("Liked",
-                                    None if pd.isna(row["liked_pct"]) else float(row["liked_pct"])),
-                        use_container_width=True,
-                        key=f"d_liked_{course}",
-                    )
+            # ---- Grouped bar comparison (replaces oversized donut grids) ----
+            st.markdown("#### 🎯 Head-to-head metrics")
+            st.caption(
+                "Horizontal bars on the same 0–10 scale. Liked % is shown out of 10 "
+                "(e.g. 80% → 8) so all three metrics line up."
+            )
+            bar_df = summary.copy()
+            bar_df["Liked (0–10)"] = bar_df["liked_pct"] / 10.0
+            bar_long = bar_df.melt(
+                id_vars=["Course"],
+                value_vars=["avg_use", "avg_diff", "Liked (0–10)"],
+                var_name="Metric",
+                value_name="Score",
+            )
+            metric_label = {
+                "avg_use": "Usefulness",
+                "avg_diff": "Difficulty",
+                "Liked (0–10)": "Liked",
+            }
+            bar_long["Metric"] = bar_long["Metric"].map(metric_label)
+            bar_fig = px.bar(
+                bar_long,
+                x="Score", y="Course", color="Metric",
+                orientation="h", barmode="group",
+                range_x=[0, 10],
+                color_discrete_map={
+                    "Usefulness": "#2E86DE",
+                    "Difficulty": "#E67E22",
+                    "Liked": "#27AE60",
+                },
+                text=bar_long["Score"].map(lambda v: "—" if pd.isna(v) else f"{v:.1f}"),
+            )
+            bar_fig.update_traces(textposition="outside", cliponaxis=False)
+            bar_fig.update_layout(
+                height=max(220, 90 * len(selected) + 80),
+                margin=dict(l=20, r=20, t=20, b=20),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                yaxis=dict(autorange="reversed"),
+            )
+            st.plotly_chart(bar_fig, use_container_width=True)
 
             st.divider()
 
