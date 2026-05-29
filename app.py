@@ -1094,38 +1094,7 @@ component_filter = st.sidebar.multiselect(
 )
 
 st.sidebar.divider()
-st.sidebar.subheader("Ranking weights")
-
-# ---- Preset profiles ----
-PRESETS = {
-    "Easy semester":  {"w_use": 0.10, "w_like": 0.30, "w_ease": 0.60},
-    "High-ROI":       {"w_use": 0.70, "w_like": 0.10, "w_ease": 0.20},
-    "Just enjoyable": {"w_use": 0.20, "w_like": 0.70, "w_ease": 0.10},
-    "Balanced":       {"w_use": 0.45, "w_like": 0.35, "w_ease": 0.20},
-}
-
-for _k, _v in PRESETS["Balanced"].items():
-    st.session_state.setdefault(_k, _v)
-
-st.sidebar.caption("Quick preset (overrides sliders):")
-pcols = st.sidebar.columns(2)
-preset_labels = list(PRESETS.keys())
-for i, label in enumerate(preset_labels):
-    if pcols[i % 2].button(label, key=f"preset_{label}", use_container_width=True):
-        for k, v in PRESETS[label].items():
-            st.session_state[k] = v
-        st.rerun()
-
-w_use = st.sidebar.slider("Usefulness importance", 0.0, 1.0, key="w_use", step=0.05)
-w_like = st.sidebar.slider("Liked importance", 0.0, 1.0, key="w_like", step=0.05)
-w_ease = st.sidebar.slider("Ease importance (10 - difficulty)", 0.0, 1.0, key="w_ease", step=0.05)
 min_reviews = st.sidebar.slider("Minimum # of reviews", 1, int(max(1, df.groupby(COURSE_COL).size().max())), 1)
-
-w_sum = w_use + w_like + w_ease
-if w_sum == 0:
-    w_use, w_like, w_ease = 0.45, 0.35, 0.20
-else:
-    w_use, w_like, w_ease = w_use / w_sum, w_like / w_sum, w_ease / w_sum
 
 filtered = df.copy()
 
@@ -1181,16 +1150,10 @@ with tab_overview:
     if summary.empty:
         st.info("No courses match your current filters.")
     else:
-        shrink = summary["n"] / (summary["n"] + 5.0)
-        summary["value_raw"] = (
-            w_use * summary["avg_use"] +
-            w_like * (summary["liked_pct"] / 10.0) +
-            w_ease * (10.0 - summary["avg_diff"])
-        )
-        summary["value_score"] = summary["value_raw"] * shrink
+        # Derived only for the bubble chart layout below — not shown in the table
         summary["ease"] = 10.0 - summary["avg_diff"]
 
-        st.subheader("Rankings (personalized)")
+        st.subheader("Course rankings")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             total_courses = summary["Course"].nunique()
@@ -1204,12 +1167,10 @@ with tab_overview:
         with c4:
             st.metric("Avg difficulty (all)", f"{summary['avg_diff'].mean():.2f}" if summary["avg_diff"].notna().any() else "—")
 
-        st.write(
-            f"Ranking weights: **Usefulness {w_use:.2f}**, **Liked {w_like:.2f}**, **Ease {w_ease:.2f}**. "
-            f"Minimum reviews: **{min_reviews}**."
-        )
+        st.write(f"Minimum reviews: **{min_reviews}**.")
 
-        show = summary.sort_values("value_score", ascending=False).copy()
+        # Sort by # reviews descending — most-reviewed (highest signal) first
+        show = summary.sort_values("n", ascending=False).copy()
         show["avg_use_disp"] = show.apply(
             lambda r: "—" if pd.isna(r["avg_use"]) else f"{r['avg_use']:.1f} (med {r['med_use']:.0f})",
             axis=1,
@@ -1219,42 +1180,28 @@ with tab_overview:
             axis=1,
         )
         show["liked_disp"] = show["liked_pct"].map(lambda x: "—" if pd.isna(x) else f"{x:.0f}%")
-        show["value_disp"] = show["value_score"].map(lambda x: "—" if pd.isna(x) else f"{x:.2f}")
-        show["sent_disp"] = show["sentiment"].map(
-            lambda x: "—" if pd.isna(x) else (f"+{x:.0f}" if x >= 0 else f"{x:.0f}")
-        )
 
         # Rename for display
         show_disp = show.rename(columns={
             "avg_use_disp": "Useful",
             "avg_diff_disp": "Difficult",
             "liked_disp": "Liked",
-            "value_disp": "Score",
-            "sent_disp": "Sentiment",
             "style": "Style",
         })
 
-        display_cols = ["Course", "Type", "Style", "n", "Useful", "Difficult", "Liked", "Score", "confidence"]
+        display_cols = ["Course", "Type", "Style", "n", "Useful", "Difficult", "Liked"]
 
         def _row_style(row):
             styles = [""] * len(row)
             cols = list(row.index)
             type_idx = cols.index("Type")
             style_idx = cols.index("Style")
-            conf_idx = cols.index("confidence")
 
             type_color = TYPE_COLORS.get(row["Type"], "#888")
             styles[type_idx] = f"background-color: {type_color}; color: white; font-weight:600; text-align:center;"
 
             style_color = STYLE_COLORS.get(row["Style"], "#7f8c8d")
             styles[style_idx] = f"background-color: {style_color}; color: white; font-weight:600; text-align:center;"
-
-            # Confidence: yellow for Low/Very low
-            conf_val = row["confidence"]
-            if conf_val == "Very low":
-                styles[conf_idx] = "background-color: #fff3cd; color: #856404; font-weight:600;"
-            elif conf_val == "Low":
-                styles[conf_idx] = "background-color: #fff8e1; color: #8a6d3b;"
 
             return styles
 
@@ -1294,21 +1241,6 @@ with tab_overview:
                 "Liked": st.column_config.TextColumn(
                     "Liked",
                     help="% of reviewers who answered 'Yes' to 'Did you like this class?'",
-                ),
-                "Score": st.column_config.TextColumn(
-                    "Score",
-                    help=(
-                        "Personalized value score using the weights in the sidebar. Bayesian-shrunk: "
-                        "low-n courses are pulled toward the average so 1-review courses don't dominate."
-                    ),
-                ),
-                "confidence": st.column_config.TextColumn(
-                    "Confidence",
-                    help=(
-                        "How much to trust this row's averages, based purely on review count. "
-                        "n≥15: High · n≥6: Medium · n≥3: Low · n<3: Very low. "
-                        "Most courses will be 'Very low' until more reviews come in."
-                    ),
                 ),
             },
         )
