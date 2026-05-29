@@ -1807,20 +1807,127 @@ with tab_compare:
 
             st.divider()
 
-            # ---- Recent comments per course ----
-            st.subheader("Recent comments")
+            # ---- Decision helper (replaces raw comment dump) ----
+            st.subheader("💡 Which one should you pick?")
+
+            # Build stats + sample comments per course for the AI prompt
+            decision_stats = {}
+            decision_comments = {}
             for course in selected:
-                fc = comp[comp[COURSE_COL] == course].copy()
+                row = summary[summary["Course"] == course].iloc[0]
+                decision_stats[course] = {
+                    "Type": classify_course_type(course),
+                    "style": row.get("style", "Unknown"),
+                    "avg_use": row["avg_use"],
+                    "avg_diff": row["avg_diff"],
+                    "liked_pct": row["liked_pct"],
+                    "n": int(row["n"]),
+                }
+                fc = comp[comp[COURSE_COL] == course]
                 if "_ts" in fc.columns:
                     fc = fc.sort_values("_ts", ascending=False)
+                cs = fc.get(COMMENTS_COL, pd.Series(dtype=str)).dropna().astype(str)
+                cs = cs[cs.str.strip() != ""].tolist()
+                decision_comments[course] = cs[:3]
 
-                comments = fc.get(COMMENTS_COL, pd.Series(dtype=str)).dropna().astype(str)
-                comments = comments[comments.str.strip() != ""]
+            # Cache key invalidates when selection or any underlying number changes
+            _decision_key = hashlib.md5(
+                (str(selected) + str(decision_stats) + str(decision_comments)).encode()
+            ).hexdigest()
 
-                st.markdown(f"**{course}**")
-                if comments.empty:
-                    st.caption("_No comments._")
+            @st.cache_data(ttl=24 * 3600, show_spinner=False)
+            def _generate_decision(key: str, courses_t: tuple, stats_t: tuple,
+                                   comments_t: tuple):
+                hf_token = st.secrets.get("HF_API_TOKEN") or ""
+                courses = list(courses_t)
+                stats = dict(stats_t)
+                cmts = dict(comments_t)
+
+                if not hf_token:
+                    return None, "no_token"
+
+                lines = [
+                    "Help a student choose between these courses. Be specific to the "
+                    "actual data — refer to course names. Avoid generic phrasing.",
+                    "",
+                ]
+                for c in courses:
+                    s = stats.get(c, {})
+                    use_s = f"{s.get('avg_use'):.1f}" if s.get("avg_use") is not None and not pd.isna(s.get("avg_use")) else "—"
+                    diff_s = f"{s.get('avg_diff'):.1f}" if s.get("avg_diff") is not None and not pd.isna(s.get("avg_diff")) else "—"
+                    liked_s = f"{s.get('liked_pct'):.0f}%" if s.get("liked_pct") is not None and not pd.isna(s.get("liked_pct")) else "—"
+                    lines.append(f"### {c}")
+                    lines.append(
+                        f"- {s.get('Type', 'Unknown')} · {s.get('style', 'Unknown')} · "
+                        f"Useful {use_s}/10 · Difficulty {diff_s}/10 · Liked {liked_s} · n={s.get('n', 0)}"
+                    )
+                    sample = cmts.get(c, [])
+                    if sample:
+                        lines.append("- Sample student reviews:")
+                        for cm in sample:
+                            lines.append(f"  > {cm[:260].strip()}")
+                    lines.append("")
+
+                lines.append(
+                    "Output EXACTLY this markdown structure (no extra prose):\n\n"
+                    "**🎯 Bottom line:** <one sentence: who should pick which course>\n\n"
+                    "Then for each course, one block:\n\n"
+                    "**<Course Name>**\n"
+                    "- ✓ Best for: <one specific line, max 14 words>\n"
+                    "- ⚠ Watch out: <one specific line, max 14 words>\n\n"
+                    "Do NOT add an introduction or conclusion outside this structure."
+                )
+                system = (
+                    "You write concise comparative course-pick recommendations for students. "
+                    "Output ONLY the requested markdown format. Be specific and avoid generic advice."
+                )
+                text, status = _hf_chat_summarize(
+                    "\n".join(lines), hf_token, system_msg=system, max_tokens=500,
+                )
+                return text, status
+
+            with st.spinner("Comparing courses..."):
+                decision_text, decision_status = _generate_decision(
+                    _decision_key,
+                    tuple(selected),
+                    tuple(decision_stats.items()),
+                    tuple((k, tuple(v)) for k, v in decision_comments.items()),
+                )
+
+            if decision_text:
+                with st.container(border=True):
+                    st.markdown(decision_text)
+            else:
+                # Structured fallback when AI is unavailable
+                if decision_status == "no_token":
+                    st.info(
+                        "_Add `HF_API_TOKEN` to Streamlit secrets for an AI comparison. "
+                        "Showing structured comparison below._"
+                    )
                 else:
-                    for c in comments.head(3).tolist():
-                        st.write(f"• {c}")
-                st.write("")
+                    st.warning(f"AI comparison unavailable ({decision_status}). Showing structured comparison.")
+                # Per-course quick verdict from stats only
+                qc1, qc2, qc3, qc4 = st.columns(min(4, len(selected)))
+                col_iter = [qc1, qc2, qc3, qc4][: len(selected)]
+                for col, course in zip(col_iter, selected):
+                    s = decision_stats[course]
+                    with col:
+                        with st.container(border=True):
+                            st.markdown(f"**{course}**")
+                            tags = []
+                            if not pd.isna(s["avg_use"]) and s["avg_use"] >= 8:
+                                tags.append("✓ Highly useful")
+                            if not pd.isna(s["avg_diff"]) and s["avg_diff"] <= 4:
+                                tags.append("✓ Manageable workload")
+                            elif not pd.isna(s["avg_diff"]) and s["avg_diff"] >= 8:
+                                tags.append("⚠ Very challenging")
+                            if not pd.isna(s["liked_pct"]) and s["liked_pct"] >= 80:
+                                tags.append("✓ Strong recommendation")
+                            elif not pd.isna(s["liked_pct"]) and s["liked_pct"] < 50:
+                                tags.append("⚠ Mixed reception")
+                            if s["n"] < 3:
+                                tags.append("⚠ Few reviews — interpret cautiously")
+                            for t in tags:
+                                st.markdown(f"- {t}")
+                            if not tags:
+                                st.caption("_No standout signal yet._")
