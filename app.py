@@ -1433,14 +1433,6 @@ with tab_deep:
         with k4:
             st.metric("Liked", "—" if liked_pct is None else f"{liked_pct:.0f}%")
 
-        d1, d2, d3 = st.columns(3)
-        with d1:
-            st.plotly_chart(donut_score("Usefulness", avg_use), use_container_width=True)
-        with d2:
-            st.plotly_chart(donut_score("Difficulty", avg_diff), use_container_width=True)
-        with d3:
-            st.plotly_chart(donut_yesno("Liked", liked_pct), use_container_width=True)
-
         st.subheader("Where every review falls")
         st.caption("Each dot is one student's rating. Dashed line is the average.")
         sp1, sp2 = st.columns(2)
