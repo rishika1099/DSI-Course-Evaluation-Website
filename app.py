@@ -95,6 +95,45 @@ _COMPONENT_ALIASES = {
     "Presentations":  [r"presentations?"],
 }
 
+# Course-style classifier (derived from components)
+STYLE_COLORS = {
+    "Exam-driven":      "#c0392b",
+    "Project-driven":   "#1e8449",
+    "Mixed":            "#7d3c98",
+    "Reading-heavy":    "#b9770e",
+    "Problem-set-heavy":"#2471a3",
+    "—":                "#7f8c8d",
+}
+
+def classify_style(comp_freq: dict, n_reviews: int) -> str:
+    """comp_freq: {component: count}. Returns a style label string."""
+    if not comp_freq or n_reviews == 0:
+        return "—"
+    pct = {k: v / n_reviews for k, v in comp_freq.items()}
+    has_exam = max(pct.get("Midterm Exam", 0), pct.get("Final Exam", 0)) >= 0.4
+    has_project = max(pct.get("Projects", 0), pct.get("Final Project", 0)) >= 0.4
+    has_psets = pct.get("Problem Sets", 0) >= 0.5
+    has_readings = pct.get("Readings", 0) >= 0.5
+    if has_exam and has_project:
+        return "Mixed"
+    if has_exam:
+        return "Exam-driven"
+    if has_project:
+        return "Project-driven"
+    if has_psets:
+        return "Problem-set-heavy"
+    if has_readings:
+        return "Reading-heavy"
+    return "Mixed"
+
+def style_badge(style: str) -> str:
+    color = STYLE_COLORS.get(style, "#7f8c8d")
+    return (
+        f"<span style='background:{color}; color:#fff; padding:2px 10px; "
+        f"border-radius:10px; font-size:0.8rem; font-weight:600;'>{style}</span>"
+    )
+
+
 def parse_components(s) -> set:
     if not isinstance(s, str) or not s.strip():
         return set()
@@ -307,9 +346,14 @@ def rating_strip(values: pd.Series, title: str, color: str = "#1f77b4"):
             showlegend=False,
         ))
         mean_val = s.mean()
+        median_val = s.median()
         fig.add_vline(x=mean_val, line_dash="dash", line_color="gray",
                       annotation_text=f"avg {mean_val:.1f}",
                       annotation_position="top")
+        # Median line below — robust to outliers
+        fig.add_vline(x=median_val, line_dash="dot", line_color="#2c3e50",
+                      annotation_text=f"med {median_val:.0f}",
+                      annotation_position="bottom")
 
     fig.update_layout(
         title={"text": title, "x": 0.0, "font": {"size": 14}},
@@ -324,6 +368,25 @@ def rating_strip(values: pd.Series, title: str, color: str = "#1f77b4"):
     return fig
 
 
+def _sentiment_score(comments: pd.Series) -> float:
+    """Returns net sentiment as % (-100..+100) using POS_WORDS/NEG_WORDS."""
+    s = comments.dropna().astype(str)
+    s = s[s.str.strip() != ""]
+    if s.empty:
+        return float("nan")
+    pos = neg = 0
+    for c in s:
+        flags = _classify_comment(c)
+        if flags["positive"]:
+            pos += 1
+        if flags["negative"]:
+            neg += 1
+    n = pos + neg
+    if n == 0:
+        return 0.0
+    return 100.0 * (pos - neg) / n
+
+
 def compute_course_summary(df: pd.DataFrame) -> pd.DataFrame:
     g = df.groupby(COURSE_COL, dropna=False)
 
@@ -335,11 +398,32 @@ def compute_course_summary(df: pd.DataFrame) -> pd.DataFrame:
         ),
         "n": g.size().values,
         "avg_use": g[USE_COL].mean().values if USE_COL in df.columns else np.nan,
+        "med_use": g[USE_COL].median().values if USE_COL in df.columns else np.nan,
         "avg_diff": g[DIFF_COL].mean().values if DIFF_COL in df.columns else np.nan,
+        "med_diff": g[DIFF_COL].median().values if DIFF_COL in df.columns else np.nan,
         "liked_pct": (g[LIKED_COL].mean().values * 100.0) if LIKED_COL in df.columns else np.nan,
     })
 
-    shrink = summary["n"] / (summary["n"] + 5.0)
+    # Sentiment from comments (robust extra signal beyond Liked Y/N)
+    if COMMENTS_COL in df.columns:
+        summary["sentiment"] = g[COMMENTS_COL].apply(_sentiment_score).values
+    else:
+        summary["sentiment"] = np.nan
+
+    # Course style derived from components
+    if "_components" in df.columns:
+        def _style_for_group(s: pd.Series):
+            counts = Counter()
+            for comps in s:
+                for c in comps:
+                    counts[c] += 1
+            return classify_style(dict(counts), len(s))
+        summary["style"] = g["_components"].apply(_style_for_group).values
+    else:
+        summary["style"] = "—"
+
+    # Stronger Bayesian shrinkage so n=1 courses don't dominate
+    shrink = summary["n"] / (summary["n"] + 8.0)
     summary["value_raw"] = (
         0.45 * summary["avg_use"] +
         0.35 * (summary["liked_pct"] / 10.0) +
@@ -352,7 +436,9 @@ def compute_course_summary(df: pd.DataFrame) -> pd.DataFrame:
             return "High"
         if n >= 6:
             return "Medium"
-        return "Low"
+        if n >= 3:
+            return "Low"
+        return "Very low"
 
     summary["confidence"] = summary["n"].apply(conf)
     return summary
@@ -435,7 +521,7 @@ def _hf_summarize(text: str, hf_token: str,
         result = client.summarization(
             text,
             model="facebook/bart-large-cnn",
-            generate_parameters={
+            parameters={
                 "max_length": max_length,
                 "min_length": min_length,
                 "do_sample": False,
@@ -549,10 +635,22 @@ def _render_review_cards(df_slice: pd.DataFrame):
         use_str = "—" if pd.isna(use) else f"{use:.0f}/10"
         term_html = term_badge(term) + " " if isinstance(term, str) and term else ""
 
+        # Possible misclick: liked=No but usefulness very high (or vice versa) AND no comment
+        inconsistent = False
+        if isinstance(comment, str) and not comment.strip():
+            if (liked is False and not pd.isna(use) and use >= 8) or \
+               (liked is True and not pd.isna(use) and use <= 3):
+                inconsistent = True
+        flag_html = (
+            "<span style='background:#fff3cd; color:#856404; padding:2px 8px; "
+            "border-radius:8px; font-size:0.7rem; font-weight:600; margin-left:6px;'>⚠ may be misclick</span>"
+            if inconsistent else ""
+        )
+
         with st.container(border=True):
             h1, h2, h3, h4 = st.columns([2.5, 1.3, 1.3, 1.3])
             h1.markdown(
-                f"{term_html}<span style='color:#555;'>{sem} · {ts}</span>",
+                f"{term_html}<span style='color:#555;'>{sem} · {ts}</span>{flag_html}",
                 unsafe_allow_html=True,
             )
             h2.markdown(f"**Useful:** {use_str}")
@@ -611,6 +709,12 @@ all_years = sorted(
 )
 year_filter = st.sidebar.multiselect("Year", all_years, default=[])
 
+recent_only = st.sidebar.checkbox(
+    "Recent reviews only (last 2 years)",
+    value=False,
+    help="Hide reviews older than 2 years — useful if a course's professor or curriculum changed.",
+)
+
 component_filter = st.sidebar.multiselect(
     "Must have components",
     KNOWN_COMPONENTS,
@@ -619,10 +723,31 @@ component_filter = st.sidebar.multiselect(
 )
 
 st.sidebar.divider()
-st.sidebar.subheader("Overview sliders (Rankings)")
-w_use = st.sidebar.slider("Usefulness importance", 0.0, 1.0, 0.45, 0.05)
-w_like = st.sidebar.slider("Liked importance", 0.0, 1.0, 0.35, 0.05)
-w_ease = st.sidebar.slider("Ease importance (10 - difficulty)", 0.0, 1.0, 0.20, 0.05)
+st.sidebar.subheader("Ranking weights")
+
+# ---- Preset profiles ----
+PRESETS = {
+    "Easy semester":  {"w_use": 0.10, "w_like": 0.30, "w_ease": 0.60},
+    "High-ROI":       {"w_use": 0.70, "w_like": 0.10, "w_ease": 0.20},
+    "Just enjoyable": {"w_use": 0.20, "w_like": 0.70, "w_ease": 0.10},
+    "Balanced":       {"w_use": 0.45, "w_like": 0.35, "w_ease": 0.20},
+}
+
+for _k, _v in PRESETS["Balanced"].items():
+    st.session_state.setdefault(_k, _v)
+
+st.sidebar.caption("Quick preset (overrides sliders):")
+pcols = st.sidebar.columns(2)
+preset_labels = list(PRESETS.keys())
+for i, label in enumerate(preset_labels):
+    if pcols[i % 2].button(label, key=f"preset_{label}", use_container_width=True):
+        for k, v in PRESETS[label].items():
+            st.session_state[k] = v
+        st.rerun()
+
+w_use = st.sidebar.slider("Usefulness importance", 0.0, 1.0, key="w_use", step=0.05)
+w_like = st.sidebar.slider("Liked importance", 0.0, 1.0, key="w_like", step=0.05)
+w_ease = st.sidebar.slider("Ease importance (10 - difficulty)", 0.0, 1.0, key="w_ease", step=0.05)
 min_reviews = st.sidebar.slider("Minimum # of reviews", 1, int(max(1, df.groupby(COURSE_COL).size().max())), 1)
 
 w_sum = w_use + w_like + w_ease
@@ -646,6 +771,9 @@ if term_filter and "_term" in filtered.columns:
     filtered = filtered[filtered["_term"].isin(term_filter)]
 if year_filter and "_year" in filtered.columns:
     filtered = filtered[filtered["_year"].isin(year_filter)]
+if recent_only and "_year" in filtered.columns:
+    cutoff = datetime.now().year - 1
+    filtered = filtered[filtered["_year"].fillna(0) >= cutoff]
 if component_filter and "_components" in filtered.columns and COURSE_COL in filtered.columns:
     needed = set(component_filter)
     course_comp_union = (
@@ -701,27 +829,74 @@ with tab_overview:
         )
 
         show = summary.sort_values("value_score", ascending=False).copy()
-        # keep numeric copy for styling
-        show_num = show.copy()
-        show["avg_use"] = show["avg_use"].map(lambda x: "—" if pd.isna(x) else f"{x:.2f}")
-        show["avg_diff"] = show["avg_diff"].map(lambda x: "—" if pd.isna(x) else f"{x:.2f}")
-        show["liked_pct"] = show["liked_pct"].map(lambda x: "—" if pd.isna(x) else f"{x:.0f}%")
-        show["value_score"] = show["value_score"].map(lambda x: "—" if pd.isna(x) else f"{x:.2f}")
+        show["avg_use_disp"] = show.apply(
+            lambda r: "—" if pd.isna(r["avg_use"]) else f"{r['avg_use']:.1f} (med {r['med_use']:.0f})",
+            axis=1,
+        )
+        show["avg_diff_disp"] = show.apply(
+            lambda r: "—" if pd.isna(r["avg_diff"]) else f"{r['avg_diff']:.1f} (med {r['med_diff']:.0f})",
+            axis=1,
+        )
+        show["liked_disp"] = show["liked_pct"].map(lambda x: "—" if pd.isna(x) else f"{x:.0f}%")
+        show["value_disp"] = show["value_score"].map(lambda x: "—" if pd.isna(x) else f"{x:.2f}")
+        show["sent_disp"] = show["sentiment"].map(
+            lambda x: "—" if pd.isna(x) else (f"+{x:.0f}" if x >= 0 else f"{x:.0f}")
+        )
 
-        display_cols = ["Course", "Type", "n", "avg_use", "avg_diff", "liked_pct", "value_score", "confidence"]
+        # Rename for display
+        show_disp = show.rename(columns={
+            "avg_use_disp": "Useful",
+            "avg_diff_disp": "Difficult",
+            "liked_disp": "Liked",
+            "value_disp": "Score",
+            "sent_disp": "Sentiment",
+            "style": "Style",
+        })
+
+        display_cols = ["Course", "Type", "Style", "n", "Useful", "Difficult", "Liked", "Sentiment", "Score", "confidence"]
 
         def _row_style(row):
-            color = TYPE_COLORS.get(row["Type"], "#888")
             styles = [""] * len(row)
-            type_idx = list(row.index).index("Type")
-            styles[type_idx] = f"background-color: {color}; color: white; font-weight:600; text-align:center;"
+            cols = list(row.index)
+            type_idx = cols.index("Type")
+            style_idx = cols.index("Style")
+            sent_idx = cols.index("Sentiment")
+            conf_idx = cols.index("confidence")
+
+            type_color = TYPE_COLORS.get(row["Type"], "#888")
+            styles[type_idx] = f"background-color: {type_color}; color: white; font-weight:600; text-align:center;"
+
+            style_color = STYLE_COLORS.get(row["Style"], "#7f8c8d")
+            styles[style_idx] = f"background-color: {style_color}; color: white; font-weight:600; text-align:center;"
+
+            # Sentiment: green if positive, red if negative
+            sent_raw = row["Sentiment"]
+            if isinstance(sent_raw, str) and sent_raw != "—":
+                val = int(sent_raw.replace("+", ""))
+                if val >= 20:
+                    styles[sent_idx] = "background-color: #d4edda; color: #155724; font-weight:600;"
+                elif val <= -20:
+                    styles[sent_idx] = "background-color: #f8d7da; color: #721c24; font-weight:600;"
+
+            # Confidence: yellow for Low/Very low
+            conf_val = row["confidence"]
+            if conf_val == "Very low":
+                styles[conf_idx] = "background-color: #fff3cd; color: #856404; font-weight:600;"
+            elif conf_val == "Low":
+                styles[conf_idx] = "background-color: #fff8e1; color: #8a6d3b;"
+
             return styles
 
         styler = (
-            show[display_cols]
+            show_disp[display_cols]
             .style.apply(_row_style, axis=1)
         )
         st.dataframe(styler, use_container_width=True)
+        st.caption(
+            "**Useful** and **Difficult** show mean (median in parens) — if mean and median disagree, "
+            "a few outliers are pulling the average. **Sentiment** is net positive/negative tone from comments "
+            "(-100 to +100). **Score** is shrunk toward the average for low-n courses."
+        )
 
         # ---- Bubble chart (replaces the bar plot) ----
         st.subheader("Where each course sits")
@@ -784,28 +959,55 @@ with tab_deep:
     else:
         course = st.selectbox("Select a course", course_options)
         _ctype = classify_course_type(course)
-        st.markdown(
-            f"<div style='margin: 4px 0 10px 0;'>Type: {type_badge(_ctype)}</div>",
-            unsafe_allow_html=True,
-        )
 
         f = filtered[filtered[COURSE_COL] == course].copy()
         n = len(f)
 
-        avg_use = safe_mean(f.get(USE_COL, pd.Series(dtype=float)))
-        avg_diff = safe_mean(f.get(DIFF_COL, pd.Series(dtype=float)))
+        # Course style chip from components
+        comp_counts = Counter()
+        for comps in f.get("_components", []):
+            for c in comps:
+                comp_counts[c] += 1
+        _style = classify_style(dict(comp_counts), n)
+
+        st.markdown(
+            f"<div style='margin: 4px 0 10px 0;'>"
+            f"Type: {type_badge(_ctype)} &nbsp; "
+            f"Style: {style_badge(_style)}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        use_series = pd.to_numeric(f.get(USE_COL, pd.Series(dtype=float)), errors="coerce").dropna()
+        diff_series = pd.to_numeric(f.get(DIFF_COL, pd.Series(dtype=float)), errors="coerce").dropna()
+        avg_use = float(use_series.mean()) if not use_series.empty else None
+        med_use = float(use_series.median()) if not use_series.empty else None
+        avg_diff = float(diff_series.mean()) if not diff_series.empty else None
+        med_diff = float(diff_series.median()) if not diff_series.empty else None
         liked_pct = safe_pct_true(f.get(LIKED_COL, pd.Series(dtype=bool)))
 
-        if n < 3:
-            st.warning("Only a few reviews for this course. Treat averages as low-confidence.")
+        # Low-n caveat banner
+        if n <= 2:
+            st.warning(
+                f"⚠️ **Only {n} review{'s' if n != 1 else ''}** — a single misclick can swing these "
+                f"numbers a lot. Use median (below mean) as a sanity check, and read the comments."
+            )
+        elif n < 5:
+            st.info(f"Only {n} reviews — interpret averages cautiously.")
 
         k1, k2, k3, k4 = st.columns([1, 1, 1, 2])
         with k1:
             st.metric("Reviews", n)
         with k2:
-            st.metric("Avg usefulness", "—" if avg_use is None else f"{avg_use:.2f} / 10")
+            st.metric(
+                "Usefulness", "—" if avg_use is None else f"{avg_use:.1f} / 10",
+                help=f"Median: {med_use:.0f} / 10" if med_use is not None else None,
+            )
         with k3:
-            st.metric("Avg difficulty", "—" if avg_diff is None else f"{avg_diff:.2f} / 10")
+            st.metric(
+                "Difficulty", "—" if avg_diff is None else f"{avg_diff:.1f} / 10",
+                help=f"Median: {med_diff:.0f} / 10" if med_diff is not None else None,
+            )
         with k4:
             st.metric("Liked", "—" if liked_pct is None else f"{liked_pct:.0f}%")
 
@@ -857,6 +1059,34 @@ with tab_deep:
 
         # ---- REVIEWS SECTION ----
         st.subheader(f"Reviews ({n})")
+
+        # ---- Pinned: most helpful review ----
+        _tip_re = re.compile("|".join(TIP_PATTERNS), re.IGNORECASE)
+        candidates = f.copy()
+        if COMMENTS_COL in candidates.columns:
+            candidates["_comment_str"] = candidates[COMMENTS_COL].fillna("").astype(str)
+            candidates["_has_tip"] = candidates["_comment_str"].apply(lambda c: bool(_tip_re.search(c)))
+            candidates["_clen"] = candidates["_comment_str"].str.len()
+            with_tip = candidates[candidates["_has_tip"] & (candidates["_clen"] > 80)]
+            pool = with_tip if not with_tip.empty else candidates[candidates["_clen"] > 120]
+            if not pool.empty:
+                top = pool.sort_values("_clen", ascending=False).iloc[0]
+                top_comment = top["_comment_str"]
+                top_prof = top.get(PROF_COL, "") or "—"
+                top_sem = top.get(SEM_COL, "") or "—"
+                top_use = top.get(USE_COL, None)
+                top_diff = top.get(DIFF_COL, None)
+                use_s = "—" if pd.isna(top_use) else f"{top_use:.0f}/10"
+                diff_s = "—" if pd.isna(top_diff) else f"{top_diff:.0f}/10"
+                with st.container(border=True):
+                    st.markdown(
+                        "<span style='background:#27ae60; color:#fff; padding:2px 10px; "
+                        "border-radius:10px; font-size:0.75rem; font-weight:600;'>⭐ Most helpful review</span> "
+                        f"<span style='color:#666; font-size:0.85rem;'>· Prof. {top_prof} · {top_sem} · "
+                        f"Useful {use_s} · Difficulty {diff_s}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.write(top_comment)
 
         with st.container(border=True):
             st.markdown("**Filter reviews**")
