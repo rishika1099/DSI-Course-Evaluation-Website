@@ -893,50 +893,61 @@ def generate_review_summaries(course: str, comments_hash: str,
         else:
             result["errors"].append(f"overall: {status}")
 
-    # ---- Per-bucket: AI-extract bullets if 2+ comments, else show as quote ----
+    # ---- Per-bucket: AI-extract bullets from ALL comments (model decides relevance) ----
     bucket_to_key = {"positive": "positive", "negative": "negative", "tip": "tips"}
     bucket_intro = {
         "positive": (
-            "From the student reviews below, extract 2-4 SHORT bullet points "
-            "(max 12 words each) of what students consistently LOVED about this course. "
-            "Use '- ' at the start of each bullet. No introduction, no conclusion, "
-            "just the bullets:"
+            "From the student reviews below, extract 1-4 SHORT bullet points "
+            "(max 12 words each) of what students LOVED about this course. "
+            "If no clearly positive content exists, output exactly: NONE\n"
+            "Otherwise use '- ' at the start of each bullet. No intro, no conclusion, "
+            "no headers. Deduplicate similar points."
         ),
         "negative": (
-            "From the student reviews below, extract 2-4 SHORT bullet points "
-            "(max 12 words each) of COMMON COMPLAINTS about this course. "
-            "Use '- ' at the start of each bullet. No introduction, no conclusion, "
-            "just the bullets:"
+            "From the student reviews below, extract 1-4 SHORT bullet points "
+            "(max 12 words each) of COMPLAINTS or things students disliked. "
+            "If no clearly negative content exists, output exactly: NONE\n"
+            "Otherwise use '- ' at the start of each bullet. No intro, no conclusion, "
+            "no headers. Deduplicate similar points."
         ),
         "tip": (
-            "From the student reviews below, extract 2-4 SHORT, actionable TIPS "
-            "(max 12 words each) for doing well in this course. "
-            "Use '- ' at the start of each bullet. No introduction, no conclusion, "
-            "just the bullets:"
+            "From the student reviews below, extract 1-4 SHORT, actionable TIPS "
+            "(max 12 words each) for doing well in this course (study habits, "
+            "office hours, what to prioritize, etc). "
+            "If no clear tips exist, output exactly: NONE\n"
+            "Otherwise use '- ' at the start of each bullet. No intro, no conclusion, "
+            "no headers."
         ),
     }
+    bullet_system = (
+        "You extract short, concrete bullet points from student course reviews. "
+        "Output ONLY markdown bullets starting with '- ', OR the literal word NONE if "
+        "the requested content is not present. No introduction, no conclusion, "
+        "no headers. Max 12 words per bullet. Deduplicate similar points."
+    )
+
+    # Feed ALL comments to each bucket — the model decides what's relevant.
+    # Keyword-bucketed comments are kept only as the no-AI-fallback content.
+    all_comments_text = "\n---\n".join(c.strip() for c in comments if c.strip())
     for bkey, out_key in bucket_to_key.items():
         bucket = buckets[bkey]
-        if not bucket:
-            continue
-        if hf_token and len(bucket) >= 2:
-            prompt = bucket_intro[bkey] + "\n\n" + "\n---\n".join(bucket)
-            bullet_system = (
-                "You extract short, concrete bullet points from student course reviews. "
-                "Output ONLY markdown bullets starting with '- '. No introduction, no "
-                "conclusion, no headers. Max 12 words per bullet. 2-4 bullets total. "
-                "Deduplicate similar points."
-            )
+        if hf_token and comments and all_comments_text:
+            prompt = bucket_intro[bkey] + "\n\nREVIEWS:\n" + all_comments_text
             text, status = _hf_chat_summarize(
-                prompt, hf_token, system_msg=bullet_system, max_tokens=200,
+                prompt, hf_token, system_msg=bullet_system, max_tokens=220,
             )
             if status == "ok":
-                result[out_key] = text
+                cleaned = (text or "").strip()
+                # Model explicitly said nothing fits
+                if cleaned.upper().startswith("NONE") or cleaned == "":
+                    continue   # leave result[out_key] = None → UI shows empty-state caption
+                result[out_key] = cleaned
                 continue
             result["errors"].append(f"{bkey}: {status}")
-        # Fallback: show single comment as a labeled quote (nothing to summarize from 1 sentence)
-        result[out_key] = bucket[:2]
-        result[out_key + "_is_quotes"] = True
+        # No HF — fall back to keyword-bucketed quotes (only if bucket non-empty)
+        if bucket:
+            result[out_key] = bucket[:2]
+            result[out_key + "_is_quotes"] = True
 
     return result
 
