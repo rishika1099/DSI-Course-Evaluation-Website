@@ -15,6 +15,51 @@ from difflib import SequenceMatcher
 st.set_page_config(page_title="Course Decision Dashboard", layout="wide")
 st_autorefresh(interval=30_000, key="autorefresh")
 
+# ---- Color-code the three top-level tabs ----
+# Streamlit tabs render as <button data-baseweb="tab"> inside a [role="tablist"]
+# container. We target the FIRST tablist (the page's main tabs) and tint each
+# button. Nested tabs (e.g. per-prof) inherit default styling.
+st.markdown(
+    """
+    <style>
+    /* Add a little space so colored tabs breathe */
+    div[role="tablist"] > button[data-baseweb="tab"] {
+        border-radius: 8px 8px 0 0;
+        padding: 8px 18px;
+        margin-right: 4px;
+        font-weight: 600;
+        border-bottom: 3px solid transparent;
+        transition: background-color 0.15s ease;
+    }
+    /* Only target the FIRST tablist on the page (top-level main tabs).
+       :nth-of-type targets within parent. Streamlit wraps each tablist
+       so we use the page-level tabs container. */
+    section.main div[role="tablist"]:first-of-type > button[data-baseweb="tab"]:nth-of-type(1) {
+        background-color: #e8eef7;   /* Columbia-blue tint */
+    }
+    section.main div[role="tablist"]:first-of-type > button[data-baseweb="tab"]:nth-of-type(1)[aria-selected="true"] {
+        background-color: #cdd9ef;
+        border-bottom-color: #012169;
+    }
+    section.main div[role="tablist"]:first-of-type > button[data-baseweb="tab"]:nth-of-type(2) {
+        background-color: #eaf5ee;   /* soft green */
+    }
+    section.main div[role="tablist"]:first-of-type > button[data-baseweb="tab"]:nth-of-type(2)[aria-selected="true"] {
+        background-color: #c8e6d3;
+        border-bottom-color: #1e8449;
+    }
+    section.main div[role="tablist"]:first-of-type > button[data-baseweb="tab"]:nth-of-type(3) {
+        background-color: #fdf2e6;   /* soft amber */
+    }
+    section.main div[role="tablist"]:first-of-type > button[data-baseweb="tab"]:nth-of-type(3)[aria-selected="true"] {
+        background-color: #f7dab9;
+        border-bottom-color: #c75b12;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # ---- Column names ----
 TS_COL = "Timestamp"
