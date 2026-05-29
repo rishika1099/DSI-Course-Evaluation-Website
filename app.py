@@ -1201,14 +1201,13 @@ with tab_overview:
             "style": "Style",
         })
 
-        display_cols = ["Course", "Type", "Style", "n", "Useful", "Difficult", "Liked", "Sentiment", "Score", "confidence"]
+        display_cols = ["Course", "Type", "Style", "n", "Useful", "Difficult", "Liked", "Score", "confidence"]
 
         def _row_style(row):
             styles = [""] * len(row)
             cols = list(row.index)
             type_idx = cols.index("Type")
             style_idx = cols.index("Style")
-            sent_idx = cols.index("Sentiment")
             conf_idx = cols.index("confidence")
 
             type_color = TYPE_COLORS.get(row["Type"], "#888")
@@ -1216,15 +1215,6 @@ with tab_overview:
 
             style_color = STYLE_COLORS.get(row["Style"], "#7f8c8d")
             styles[style_idx] = f"background-color: {style_color}; color: white; font-weight:600; text-align:center;"
-
-            # Sentiment: green if positive, red if negative
-            sent_raw = row["Sentiment"]
-            if isinstance(sent_raw, str) and sent_raw != "—":
-                val = int(sent_raw.replace("+", ""))
-                if val >= 20:
-                    styles[sent_idx] = "background-color: #d4edda; color: #155724; font-weight:600;"
-                elif val <= -20:
-                    styles[sent_idx] = "background-color: #f8d7da; color: #721c24; font-weight:600;"
 
             # Confidence: yellow for Low/Very low
             conf_val = row["confidence"]
@@ -1271,15 +1261,6 @@ with tab_overview:
                 "Liked": st.column_config.TextColumn(
                     "Liked",
                     help="% of reviewers who answered 'Yes' to 'Did you like this class?'",
-                ),
-                "Sentiment": st.column_config.TextColumn(
-                    "Sentiment",
-                    help=(
-                        "Net positive vs negative tone in the written comments, -100 to +100. "
-                        "Counts comments with positive words (great, useful, loved...) vs negative "
-                        "(confusing, harsh, frustrating...). '—' means no opinionated words were "
-                        "found in any comment (no signal — NOT neutral consensus)."
-                    ),
                 ),
                 "Score": st.column_config.TextColumn(
                     "Score",
