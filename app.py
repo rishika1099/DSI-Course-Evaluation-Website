@@ -529,6 +529,10 @@ if course_type_filter and "course_type" in filtered.columns:
     filtered = filtered[filtered["course_type"].isin(course_type_filter)]
 
 # ========== MAIN ==========
+_logo_l, _logo_c, _logo_r = st.columns([1, 2, 1])
+with _logo_c:
+    st.image("assets/dsi_council_logo.png", use_container_width=True)
+
 st.title("Course Decision Dashboard")
 st.caption("Built from student responses (auto-refreshes). Use filters in the sidebar.")
 
