@@ -10,6 +10,7 @@ from collections import Counter
 import re
 import hashlib
 from datetime import datetime
+from difflib import SequenceMatcher
 
 st.set_page_config(page_title="Course Decision Dashboard", layout="wide")
 st_autorefresh(interval=30_000, key="autorefresh")
@@ -164,18 +165,57 @@ def _prof_normalize_key(name: str) -> str:
     return s.lower()
 
 
+def _fuzzy_cluster_keys(keys_with_counts: list[tuple[str, int]],
+                        threshold: float = 0.82) -> dict:
+    """Cluster normalized prof keys by SequenceMatcher similarity.
+    Returns a map from each key to its canonical (most-common-spelling) key.
+    'eleni drinea' and 'eleni drea' get merged; 'john smith' and 'jane smith' do NOT
+    because the threshold is high enough to require shared distinctive substrings."""
+    # Sort by frequency desc so most-common spelling becomes the cluster head
+    items = sorted(keys_with_counts, key=lambda x: -x[1])
+    clusters = []   # list of dicts: {"head": str, "members": set[str]}
+    for key, _cnt in items:
+        placed = False
+        for cl in clusters:
+            # Compare against the cluster head (most common spelling)
+            if SequenceMatcher(None, key, cl["head"]).ratio() >= threshold:
+                cl["members"].add(key)
+                placed = True
+                break
+        if not placed:
+            clusters.append({"head": key, "members": {key}})
+
+    mapping = {}
+    for cl in clusters:
+        for m in cl["members"]:
+            mapping[m] = cl["head"]
+    return mapping
+
+
 def build_prof_display_map(prof_series: pd.Series) -> dict:
+    """Returns a dict: original raw name -> canonical display name.
+    Two passes: (1) exact normalized-key dedupe, (2) fuzzy cluster near-duplicates."""
     s = prof_series.dropna().astype(str).str.strip()
     s = s[s != ""]
     if s.empty:
         return {}
     df = pd.DataFrame({"orig": s.values})
     df["key"] = df["orig"].apply(_prof_normalize_key)
-    mapping = (
+
+    # Step 1: per-normalized-key, pick the most common original spelling
+    per_key_canonical = (
         df.groupby("key")["orig"]
           .agg(lambda x: x.value_counts().idxmax())
           .to_dict()
     )
+
+    # Step 2: fuzzy-cluster the normalized keys to merge near-duplicates
+    key_counts = df["key"].value_counts().to_dict()
+    key_clusters = _fuzzy_cluster_keys(list(key_counts.items()))
+
+    mapping = {}
+    for raw_key, canon_key in key_clusters.items():
+        mapping[raw_key] = per_key_canonical.get(canon_key, per_key_canonical.get(raw_key, raw_key))
     return mapping
 
 
@@ -262,8 +302,13 @@ def load_data(sheet_id: str, worksheet_name: str) -> pd.DataFrame:
 
     if PROF_COL in df.columns:
         df["_prof_key"] = df[PROF_COL].apply(_prof_normalize_key)
+        # Fuzzy-cluster near-duplicate names (e.g. 'eleni drinea' / 'eleni drea')
+        key_counts = df["_prof_key"].value_counts().to_dict()
+        cluster_map = _fuzzy_cluster_keys(list(key_counts.items()))
+        df["_prof_canon"] = df["_prof_key"].map(cluster_map).fillna(df["_prof_key"])
     else:
         df["_prof_key"] = ""
+        df["_prof_canon"] = ""
 
     # Derive term (Fall/Spring) and year from the semester column
     if SEM_COL in df.columns:
@@ -497,47 +542,102 @@ def _bucket_comments(comments):
     return buckets
 
 
+_STOPWORDS = set(
+    "the a an and or but if then so to of in for on at by with as is was are were "
+    "be been being it this that these those i you he she we they me him her us them "
+    "my your his hers our their have has had do does did not no yes also very just "
+    "from about into over under more most some any all can will would could should "
+    "there here what which who whom how when where why".split()
+)
+
+
+def _extractive_summary(text: str, max_sentences: int = 3, max_chars: int = 480) -> str | None:
+    """Pick the most representative sentences from `text` using simple word-frequency scoring.
+    Deterministic, no network, always works."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    sents = re.split(r"(?<=[.!?])\s+", text)
+    sents = [s.strip() for s in sents if 18 <= len(s.strip()) <= 320]
+    if not sents:
+        return text[:max_chars]
+    if len(sents) <= max_sentences:
+        return " ".join(sents)[:max_chars]
+
+    words = re.findall(r"\b[a-z]{3,}\b", text.lower())
+    freq = Counter(w for w in words if w not in _STOPWORDS)
+    if not freq:
+        return " ".join(sents[:max_sentences])[:max_chars]
+
+    def score(s):
+        sw = re.findall(r"\b[a-z]{3,}\b", s.lower())
+        if not sw:
+            return 0.0
+        return sum(freq.get(w, 0) for w in sw if w not in _STOPWORDS) / len(sw)
+
+    ranked = set(sorted(sents, key=score, reverse=True)[:max_sentences])
+    # Preserve original order
+    chosen = [s for s in sents if s in ranked]
+    return " ".join(chosen)[:max_chars]
+
+
 def _hf_summarize(text: str, hf_token: str,
                   max_length: int = 120, min_length: int = 30,
-                  timeout: int = 60):
-    """Returns (summary, status) where status is 'ok' | 'empty' | 'error: <details>'."""
+                  timeout: int = 30):
+    """Returns (summary, status). status: 'ok' | 'ok-fallback' | 'empty' | 'error: ...'.
+
+    Strategy:
+      1. Try the HF Inference API via raw POST (stable across SDK versions).
+      2. If it fails for ANY reason, fall back to a local extractive summary.
+         The user gets a useful answer either way.
+    """
     if not text.strip():
         return None, "empty"
 
     if len(text) > 3500:
         text = text[:3500]
 
-    try:
-        from huggingface_hub import InferenceClient
-    except ImportError:
-        return None, "error: huggingface_hub not installed"
+    # ---- Attempt 1: HF Inference API via raw HTTP ----
+    hf_error = None
+    if hf_token:
+        try:
+            import requests
+            api_url = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
+            resp = requests.post(
+                api_url,
+                headers={"Authorization": f"Bearer {hf_token}"},
+                json={
+                    "inputs": text,
+                    "parameters": {
+                        "max_length": max_length,
+                        "min_length": min_length,
+                        "do_sample": False,
+                    },
+                    "options": {"wait_for_model": True},
+                },
+                timeout=timeout,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                summary = None
+                if isinstance(data, list) and data:
+                    summary = data[0].get("summary_text") or data[0].get("generated_text")
+                elif isinstance(data, dict):
+                    summary = data.get("summary_text") or data.get("generated_text")
+                if summary:
+                    return summary.strip(), "ok"
+                hf_error = f"unexpected response shape: {str(data)[:200]}"
+            else:
+                hf_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+        except Exception as e:
+            hf_error = f"{type(e).__name__}: {e}"
 
-    try:
-        client = InferenceClient(
-            provider="hf-inference",
-            api_key=hf_token,
-            timeout=timeout,
-        )
-        result = client.summarization(
-            text,
-            model="facebook/bart-large-cnn",
-            parameters={
-                "max_length": max_length,
-                "min_length": min_length,
-                "do_sample": False,
-            },
-        )
-        summary = (
-            getattr(result, "generated_text", None)
-            or getattr(result, "summary_text", None)
-        )
-        if not summary and isinstance(result, dict):
-            summary = result.get("generated_text") or result.get("summary_text")
-        if summary:
-            return summary.strip(), "ok"
-        return None, f"error: unexpected result shape ({type(result).__name__})"
-    except Exception as e:
-        return None, f"error: {type(e).__name__}: {e}"
+    # ---- Attempt 2: offline extractive fallback (always works) ----
+    extractive = _extractive_summary(text)
+    if extractive:
+        return extractive, "ok-fallback"
+
+    return None, f"error: {hf_error or 'no text to summarize'}"
 
 
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
@@ -554,8 +654,10 @@ def generate_review_summaries(course: str, comments_hash: str, comments_tuple: t
 
     all_text = " ".join(comments)
     overall, status = _hf_summarize(all_text, hf_token, max_length=140, min_length=50)
-    if status == "ok":
+    if status in ("ok", "ok-fallback"):
         result["overall"] = overall
+        if status == "ok-fallback":
+            result["used_fallback"] = True
     elif status.startswith("error"):
         result["errors"].append(f"overall: {status}")
 
@@ -566,9 +668,11 @@ def generate_review_summaries(course: str, comments_hash: str, comments_tuple: t
             continue
         joined = " ".join(bucket)
         summary, sub_status = _hf_summarize(joined, hf_token)
-        if sub_status == "ok":
+        if sub_status in ("ok", "ok-fallback"):
             out_key = "tips" if key == "tip" else key
             result[out_key] = summary
+            if sub_status == "ok-fallback":
+                result["used_fallback"] = True
         elif sub_status.startswith("error"):
             result["errors"].append(f"{key}: {sub_status}")
 
@@ -762,8 +866,18 @@ if course_search and COURSE_COL in filtered.columns:
     filtered = filtered[filtered[COURSE_COL].astype(str).str.lower().str.contains(course_search, na=False)]
 
 if prof_filter and PROF_COL in filtered.columns:
-    selected_keys = {_prof_normalize_key(p) for p in prof_filter}
-    filtered = filtered[filtered["_prof_key"].isin(selected_keys)]
+    # Translate selected display names back to canonical keys via the prof map
+    selected_canon = set()
+    for p in prof_filter:
+        # find any raw key whose display name == p
+        for raw_key, display in _global_prof_map.items():
+            if display == p:
+                # canonical key is whatever raw_key maps to in canon column
+                rows = filtered[filtered["_prof_key"] == raw_key]
+                if not rows.empty:
+                    selected_canon.update(rows["_prof_canon"].unique())
+    if selected_canon:
+        filtered = filtered[filtered["_prof_canon"].isin(selected_canon)]
 
 if course_type_filter and "course_type" in filtered.columns:
     filtered = filtered[filtered["course_type"].isin(course_type_filter)]
@@ -1150,6 +1264,11 @@ with tab_deep:
                     with st.container(border=True):
                         st.markdown("### 📝 Summary of student reviews")
                         st.write(summaries["overall"])
+                        if summaries.get("used_fallback"):
+                            st.caption(
+                                "_Generated locally (HF AI service unavailable) — picks the most "
+                                "representative sentences from the reviews._"
+                            )
 
                 has_breakdown = any([summaries.get("positive"),
                                      summaries.get("negative"),
@@ -1182,10 +1301,12 @@ with tab_deep:
             st.info("No reviews match your filters.")
         else:
             rf = rf.copy()
-            rf["_prof_key_local"] = rf[PROF_COL].apply(_prof_normalize_key).replace("", "— unknown —")
+            # Use the canonical key (fuzzy-merged) so "Drinea" and "Drea" collapse
+            rf["_prof_group"] = rf.get("_prof_canon", rf[PROF_COL].apply(_prof_normalize_key))
+            rf["_prof_group"] = rf["_prof_group"].replace("", "— unknown —")
 
             display_map = {}
-            for key, grp in rf.groupby("_prof_key_local"):
+            for key, grp in rf.groupby("_prof_group"):
                 if key == "— unknown —":
                     display_map[key] = "— Unknown —"
                 else:
@@ -1197,19 +1318,27 @@ with tab_deep:
                         display_map[key] = "— Unknown —"
 
             prof_order_keys = (
-                rf.groupby("_prof_key_local").size()
+                rf.groupby("_prof_group").size()
                   .sort_values(ascending=False)
                   .index.tolist()
             )
 
+            # Color-code each prof tab with a deterministic colored circle prefix
+            TAB_COLORS = ["🟦", "🟧", "🟩", "🟪", "🟥", "🟨", "🟫", "⬛", "⬜"]
+            def _tab_emoji(key: str) -> str:
+                if key == "— unknown —":
+                    return "⬜"
+                idx = int(hashlib.md5(key.encode("utf-8")).hexdigest(), 16) % len(TAB_COLORS)
+                return TAB_COLORS[idx]
+
             tab_labels = [
-                f"{display_map[k]} ({rf[rf['_prof_key_local'] == k].shape[0]})"
+                f"{_tab_emoji(k)} {display_map[k]} ({rf[rf['_prof_group'] == k].shape[0]})"
                 for k in prof_order_keys
             ]
             prof_tabs = st.tabs(tab_labels)
             for prof_tab, key in zip(prof_tabs, prof_order_keys):
                 with prof_tab:
-                    _render_review_cards(rf[rf["_prof_key_local"] == key])
+                    _render_review_cards(rf[rf["_prof_group"] == key])
 
 
 # ---------- COMPARE COURSES ----------

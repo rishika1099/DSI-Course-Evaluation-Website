@@ -6,3 +6,4 @@ google-auth>=2.27
 streamlit-autorefresh>=1.0.1
 plotly>=5.18
 huggingface_hub>=0.24
+requests>=2.31
