@@ -17,6 +17,74 @@ st.set_page_config(
     layout="wide",
 )
 
+
+# ====================================================================
+# Optional Columbia-email gate (Google OAuth via st.login).
+#
+# Controlled by Streamlit secrets:
+#   enable_auth = true | false   (default: false — no gate, app is public)
+#   allowed_email_domains = ["columbia.edu"]   (optional override)
+#
+# To enable: set enable_auth=true AND configure a [auth] block in
+#   .streamlit/secrets.toml (or the Streamlit Cloud Secrets UI) with the
+#   redirect_uri, cookie_secret, client_id, client_secret from your Google
+#   Cloud OAuth credentials.
+# To revert: set enable_auth=false (or delete the line). No code change.
+# ====================================================================
+def _require_columbia_login() -> None:
+    if not st.secrets.get("enable_auth", False):
+        return  # gate disabled — app is public, original behavior
+
+    # Defensive check: native auth needs Streamlit 1.42+
+    if not hasattr(st, "login") or not hasattr(st, "user"):
+        st.error(
+            "Auth is enabled but this Streamlit version doesn't support st.login. "
+            "Upgrade streamlit to >=1.42 or set `enable_auth=false`."
+        )
+        st.stop()
+
+    allowed = st.secrets.get("allowed_email_domains", ["columbia.edu"])
+    if isinstance(allowed, str):
+        allowed = [allowed]
+    allowed = [d.lower().lstrip("@") for d in allowed]
+
+    if not st.user.is_logged_in:
+        st.markdown(
+            "<div style='max-width:520px; margin:60px auto; text-align:center;'>"
+            "<h1 style='color:#012169;'>🦁 DSI Course Decision Dashboard</h1>"
+            "<p style='color:#444; font-size:1.05rem;'>"
+            "This dashboard is restricted to Columbia University students. "
+            "Sign in with your Columbia Google account to continue."
+            "</p></div>",
+            unsafe_allow_html=True,
+        )
+        _l, _c, _r = st.columns([1, 1, 1])
+        with _c:
+            if st.button("Sign in with Google", type="primary", use_container_width=True):
+                st.login("google")
+        st.stop()
+
+    email = (st.user.email or "").lower().strip()
+    if not any(email.endswith("@" + d) for d in allowed):
+        st.error(
+            f"Access restricted to: {', '.join('@' + d for d in allowed)}\n\n"
+            f"You signed in as: **{email or 'unknown'}**"
+        )
+        if st.button("Sign out and try a different account"):
+            st.logout()
+        st.stop()
+
+    # Logged in + allowed domain → render a small sidebar identity block.
+    with st.sidebar:
+        st.caption(f"👤 Signed in as **{st.user.name or email}**")
+        if st.button("Sign out", use_container_width=True, key="_signout_btn"):
+            st.logout()
+            st.rerun()
+        st.divider()
+
+
+_require_columbia_login()
+
 # ---- Color-code the three top-level tabs ----
 # Streamlit tabs render as <button data-baseweb="tab"> inside a [role="tablist"]
 # container. We target the FIRST tablist (the page's main tabs) and tint each
