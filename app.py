@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 from collections import Counter
 import re
 import hashlib
+import logging
 from datetime import datetime
 from difflib import SequenceMatcher
 
@@ -930,7 +931,7 @@ def generate_review_summaries(course: str, comments_hash: str,
       - 'positive_is_quotes': bool — tells UI to render as blockquotes
       - 'negative_is_quotes': bool
       - 'tips_is_quotes':     bool
-      - 'errors':   list[str] for the expandable details panel
+      - 'errors':   list[str] for server diagnostics
     """
     hf_token = st.secrets.get("HF_API_TOKEN") or ""
     comments = list(comments_tuple)
@@ -1639,12 +1640,9 @@ with tab_deep:
             _render_bucket(s2, "#### 👎 Common complaints", "negative")
             _render_bucket(s3, "#### 💡 Tips for success", "tips")
 
-        # Error details (optional, only if anything failed)
-        errs = summaries.get("errors", [])
-        if errs:
-            with st.expander("AI service notes (debug)"):
-                for e in errs:
-                    st.code(e)
+        # Keep AI service diagnostics in server logs.
+        for error in summaries.get("errors", []):
+            logging.getLogger(__name__).warning("AI summary service error: %s", error)
 
         st.divider()
 
