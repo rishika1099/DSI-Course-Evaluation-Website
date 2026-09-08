@@ -1926,8 +1926,7 @@ with tab_compare:
                 else:
                     st.warning(f"AI comparison unavailable ({decision_status}). Showing structured comparison.")
                 # Per-course quick verdict from stats only
-                qc1, qc2, qc3, qc4 = st.columns(min(4, len(selected)))
-                col_iter = [qc1, qc2, qc3, qc4][: len(selected)]
+                col_iter = st.columns(len(selected))
                 for col, course in zip(col_iter, selected):
                     s = decision_stats[course]
                     with col:
