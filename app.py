@@ -11,6 +11,7 @@ import hashlib
 import logging
 from datetime import datetime
 from difflib import SequenceMatcher
+from summary_cache import get_cached_response
 
 st.set_page_config(
     page_title="DSI Course Decision Dashboard",
@@ -787,17 +788,24 @@ def _extractive_summary(text: str, max_sentences: int = 3, max_chars: int = 480)
 
 def _hf_chat_summarize(prompt: str, hf_token: str, timeout: int = 30,
                        system_msg: str | None = None, max_tokens: int = 180):
-    """Use HF Router chat completion (the current free-tier endpoint).
-    Returns (text, status) where status is 'ok' | 'error: ...'."""
-    if not hf_token:
-        return None, "error: no token"
-    default_system = (
+    """Reuse successful text for unchanged input before trying the AI service."""
+    system_msg = system_msg or (
         "You write concise, neutral summaries of student course reviews in the "
         "style of an Amazon product review summary. Always start with 'Students "
         "find this course' or 'Reviewers say'. Synthesize the overall sentiment "
         "— do not quote a single review. Maximum 3 sentences. No bullet points."
     )
-    sys_msg = system_msg or default_system
+    return get_cached_response(
+        prompt, system_msg, max_tokens,
+        lambda: _request_hf_chat_summary(prompt, hf_token, timeout, system_msg, max_tokens),
+    )
+
+
+def _request_hf_chat_summary(prompt: str, hf_token: str, timeout: int,
+                             system_msg: str, max_tokens: int):
+    """Request HF Router chat completion, returning (text, status)."""
+    if not hf_token:
+        return None, "error: no token"
     try:
         import requests
         # HF Router routes to whichever provider currently serves a given model
@@ -816,7 +824,7 @@ def _hf_chat_summarize(prompt: str, hf_token: str, timeout: int = 30,
                     json={
                         "model": model,
                         "messages": [
-                            {"role": "system", "content": sys_msg},
+                            {"role": "system", "content": system_msg},
                             {"role": "user", "content": prompt[:3500]},
                         ],
                         "max_tokens": max_tokens,
@@ -917,9 +925,8 @@ def _format_quotes(comments: list[str], max_quotes: int = 2) -> str:
     return "\n\n".join(quoted)
 
 
-@st.cache_data(ttl=24 * 3600, show_spinner=False)
-def generate_review_summaries(course: str, comments_hash: str,
-                              comments_tuple: tuple, stats_tuple: tuple) -> dict:
+def generate_review_summaries(course: str, comments_tuple: tuple,
+                              stats_tuple: tuple) -> dict:
     """Build an Amazon-style summary block.
 
     Always returns:
@@ -936,6 +943,9 @@ def generate_review_summaries(course: str, comments_hash: str,
     hf_token = st.secrets.get("HF_API_TOKEN") or ""
     comments = list(comments_tuple)
     stats = dict(stats_tuple)
+    # Reordering sheet rows must not regenerate AI text. Keep the original
+    # comment order for quote fallbacks, and retain duplicate reviews.
+    all_comments_text = "\n---\n".join(sorted(c.strip() for c in comments if c.strip()))
 
     buckets = _bucket_comments(comments)
     pos_n, neg_n, tip_n = len(buckets["positive"]), len(buckets["negative"]), len(buckets["tip"])
@@ -950,18 +960,18 @@ def generate_review_summaries(course: str, comments_hash: str,
         "status": "ok",
     }
 
-    # ---- AI overall summary (only attempt if HF token + enough material) ----
-    if hf_token and len(comments) >= 2 and sum(len(c) for c in comments) >= 120:
+    # ---- AI overall summary (reuse saved text even if the token is absent) ----
+    if len(comments) >= 2 and sum(len(c) for c in comments) >= 120:
         ai_prompt = (
             "Summarize the following student course reviews in 2-3 sentences, "
             "Amazon-review style. Focus on what students consistently say about the "
             "course's usefulness, difficulty, workload, professor, and what to expect.\n\n"
-            "REVIEWS:\n" + "\n---\n".join(c.strip() for c in comments if c.strip())
+            "REVIEWS:\n" + all_comments_text
         )
         ai_text, status = _hf_chat_summarize(ai_prompt, hf_token)
         if status == "ok":
             result["ai"] = ai_text
-        else:
+        elif hf_token:
             result["errors"].append(f"overall: {status}")
 
     # ---- Per-bucket: AI-extract bullets from ALL comments (model decides relevance) ----
@@ -999,10 +1009,9 @@ def generate_review_summaries(course: str, comments_hash: str,
 
     # Feed ALL comments to each bucket — the model decides what's relevant.
     # Keyword-bucketed comments are kept only as the no-AI-fallback content.
-    all_comments_text = "\n---\n".join(c.strip() for c in comments if c.strip())
     for bkey, out_key in bucket_to_key.items():
         bucket = buckets[bkey]
-        if hf_token and comments and all_comments_text:
+        if comments and all_comments_text:
             prompt = bucket_intro[bkey] + "\n\nREVIEWS:\n" + all_comments_text
             text, status = _hf_chat_summarize(
                 prompt, hf_token, system_msg=bullet_system, max_tokens=220,
@@ -1014,7 +1023,8 @@ def generate_review_summaries(course: str, comments_hash: str,
                     continue   # leave result[out_key] = None → UI shows empty-state caption
                 result[out_key] = cleaned
                 continue
-            result["errors"].append(f"{bkey}: {status}")
+            if hf_token:
+                result["errors"].append(f"{bkey}: {status}")
         # No HF — fall back to keyword-bucketed quotes (only if bucket non-empty)
         if bucket:
             result[out_key] = bucket[:2]
@@ -1582,13 +1592,10 @@ with tab_deep:
         }
 
         comments_list = comments_series.tolist()
-        comments_hash = hashlib.md5(
-            ("||".join(sorted(comments_list)) + str(stats_for_summary)).encode("utf-8")
-        ).hexdigest()
 
         with st.spinner("Generating summary..."):
             summaries = generate_review_summaries(
-                course, comments_hash,
+                course,
                 tuple(comments_list),
                 tuple(stats_for_summary.items()),
             )
@@ -1847,21 +1854,13 @@ with tab_compare:
                 cs = cs[cs.str.strip() != ""].tolist()
                 decision_comments[course] = cs[:3]
 
-            # Cache key invalidates when selection or any underlying number changes
-            _decision_key = hashlib.md5(
-                (str(selected) + str(decision_stats) + str(decision_comments)).encode()
-            ).hexdigest()
-
-            @st.cache_data(ttl=24 * 3600, show_spinner=False)
-            def _generate_decision(key: str, courses_t: tuple, stats_t: tuple,
+            # The response cache follows the prompt, including current ratings.
+            def _generate_decision(courses_t: tuple, stats_t: tuple,
                                    comments_t: tuple):
                 hf_token = st.secrets.get("HF_API_TOKEN") or ""
                 courses = list(courses_t)
                 stats = dict(stats_t)
                 cmts = dict(comments_t)
-
-                if not hf_token:
-                    return None, "no_token"
 
                 lines = [
                     "Help a student choose between these courses. Be specific to the "
@@ -1901,11 +1900,12 @@ with tab_compare:
                 text, status = _hf_chat_summarize(
                     "\n".join(lines), hf_token, system_msg=system, max_tokens=500,
                 )
+                if not text and not hf_token:
+                    return None, "no_token"
                 return text, status
 
             with st.spinner("Comparing courses..."):
                 decision_text, decision_status = _generate_decision(
-                    _decision_key,
                     tuple(selected),
                     tuple(decision_stats.items()),
                     tuple((k, tuple(v)) for k, v in decision_comments.items()),
